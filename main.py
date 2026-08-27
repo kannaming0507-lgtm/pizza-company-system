@@ -1,49 +1,51 @@
-from flask import (
-    Flask,
-    request,
-    redirect,
-    session,
-    render_template_string,
-    jsonify,
-    url_for
-)
+from flask import Flask, request, redirect, session, render_template_string, jsonify
 import sqlite3
 import os
-import math
-from datetime import datetime, timedelta
-from functools import wraps
-
-
-# =========================================================
-# APP CONFIG
-# =========================================================
+from datetime import datetime, timezone, timedelta
 
 app = Flask(__name__)
 
+# =========================================================
+# BASIC SETTINGS
+# =========================================================
+
 app.secret_key = os.environ.get(
     "SECRET_KEY",
-    "pizza-company-school-project-secret"
+    "pizza-company-school-project"
 )
 
-DB = os.environ.get("DB_PATH", "pizza_company.db")
+DB = os.environ.get(
+    "DATABASE_PATH",
+    "pizza_company.db"
+)
 
-# ---------------------------------------------------------
-# GPS
-# จุดอ้างอิงโรงเรียนสวนกุหลาบวิทยาลัย รังสิต
-# ---------------------------------------------------------
+ADMIN_PASSWORD = os.environ.get(
+    "ADMIN_PASSWORD",
+    "1234"
+)
 
-SKR_LAT = 14.02303
-SKR_LNG = 100.68763
+# =========================================================
+# GPS SETTINGS
+# =========================================================
 
-# อนุญาตภายใน 300 เมตร
+SKR_LAT = 14.02308
+SKR_LNG = 100.67582
+
 ALLOWED_DISTANCE_KM = 0.3
 
-# เวลาเริ่มงาน
-WORK_START = "08:00"
+# =========================================================
+# TIMEZONE
+# =========================================================
 
-# รหัสเข้าสู่ระบบ
-STAFF_PIN = os.environ.get("STAFF_PIN", "1234")
-ACCOUNT_PIN = os.environ.get("ACCOUNT_PIN", "9999")
+THAILAND_TZ = timezone(
+    timedelta(hours=7)
+)
+
+
+def now():
+    return datetime.now(
+        THAILAND_TZ
+    )
 
 
 # =========================================================
@@ -51,245 +53,206 @@ ACCOUNT_PIN = os.environ.get("ACCOUNT_PIN", "9999")
 # =========================================================
 
 def get_db():
-    conn = sqlite3.connect(DB)
+
+    conn = sqlite3.connect(
+        DB,
+        timeout=30
+    )
+
     conn.row_factory = sqlite3.Row
+
     return conn
 
 
 def init_db():
-    conn = get_db()
-    cur = conn.cursor()
 
-    cur.execute("""
+    conn = get_db()
+
+    # -----------------------------------------------------
+    # EMPLOYEES
+    # -----------------------------------------------------
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS employees (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
-            salary REAL NOT NULL DEFAULT 0,
-            department TEXT DEFAULT 'พนักงาน',
-            active INTEGER DEFAULT 1,
-            created_at TEXT
+            position TEXT DEFAULT '',
+            salary REAL DEFAULT 0,
+            phone TEXT DEFAULT '',
+            start_date TEXT DEFAULT ''
         )
     """)
 
-    cur.execute("""
+    # -----------------------------------------------------
+    # ATTENDANCE
+    # -----------------------------------------------------
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS attendance (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             employee_id TEXT NOT NULL,
-            date TEXT NOT NULL,
+            work_date TEXT NOT NULL,
             time_in TEXT,
             time_out TEXT,
             work_hours REAL DEFAULT 0,
             ot_hours REAL DEFAULT 0,
-            status TEXT DEFAULT '-',
+            status TEXT DEFAULT 'ปกติ',
+            latitude REAL,
+            longitude REAL,
             location TEXT DEFAULT '-',
-            distance_km REAL DEFAULT 0,
-            FOREIGN KEY(employee_id) REFERENCES employees(id)
+            UNIQUE(employee_id, work_date)
         )
     """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS payroll (
+    # -----------------------------------------------------
+    # LEAVES
+    # -----------------------------------------------------
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS leaves (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             employee_id TEXT NOT NULL,
-            month TEXT NOT NULL,
-            base_salary REAL DEFAULT 0,
-            ot_hours REAL DEFAULT 0,
-            ot_pay REAL DEFAULT 0,
-            total REAL DEFAULT 0,
-            created_at TEXT,
-            UNIQUE(employee_id, month)
+            leave_type TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            days INTEGER DEFAULT 1,
+            reason TEXT DEFAULT '',
+            status TEXT DEFAULT 'รออนุมัติ'
         )
     """)
 
     conn.commit()
 
-    # เพิ่มข้อมูลตัวอย่างเฉพาะกรณีฐานข้อมูลยังว่าง
-    count = cur.execute(
-        "SELECT COUNT(*) FROM employees"
-    ).fetchone()[0]
+    # -----------------------------------------------------
+    # DATABASE MIGRATION
+    # -----------------------------------------------------
+    # ป้องกันฐานข้อมูลเก่าที่ไม่มีคอลัมน์ใหม่
+    # -----------------------------------------------------
 
-    if count == 0:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    columns = conn.execute(
+        "PRAGMA table_info(attendance)"
+    ).fetchall()
 
-        cur.execute("""
-            INSERT INTO employees
-            (id, name, salary, department, active, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            "001",
-            "พนักงานตัวอย่าง",
-            15000,
-            "ฝ่ายทั่วไป",
-            1,
-            now
-        ))
+    column_names = [
+        row["name"]
+        for row in columns
+    ]
 
-        cur.execute("""
-            INSERT INTO employees
-            (id, name, salary, department, active, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            "002",
-            "จ๊ะจ๋า",
-            15000,
-            "ฝ่ายบัญชี",
-            1,
-            now
-        ))
+    if "latitude" not in column_names:
 
-        conn.commit()
+        conn.execute("""
+            ALTER TABLE attendance
+            ADD COLUMN latitude REAL
+        """)
+
+    if "longitude" not in column_names:
+
+        conn.execute("""
+            ALTER TABLE attendance
+            ADD COLUMN longitude REAL
+        """)
+
+    if "location" not in column_names:
+
+        conn.execute("""
+            ALTER TABLE attendance
+            ADD COLUMN location TEXT DEFAULT '-'
+        """)
+
+    conn.commit()
 
     conn.close()
-
-
-# =========================================================
-# LOGIN / PERMISSION (BYPASSED)
-# =========================================================
-
-def login_required(view):
-    @wraps(view)
-    def wrapped(*args, **kwargs):
-        return view(*args, **kwargs)
-    return wrapped
-
-
-def accounting_required(view):
-    @wraps(view)
-    def wrapped(*args, **kwargs):
-        return view(*args, **kwargs)
-    return wrapped
 
 
 # =========================================================
 # GPS FUNCTIONS
 # =========================================================
 
-def haversine_distance(lat1, lon1, lat2, lon2):
-    """
-    คำนวณระยะห่างระหว่างพิกัด 2 จุด
-    ผลลัพธ์เป็นกิโลเมตร
-    """
-    radius = 6371.0
-
-    lat1_rad = math.radians(lat1)
-    lat2_rad = math.radians(lat2)
-
-    delta_lat = math.radians(lat2 - lat1)
-    delta_lon = math.radians(lon2 - lon1)
-
-    a = (
-        math.sin(delta_lat / 2) ** 2
-        +
-        math.cos(lat1_rad)
-        * math.cos(lat2_rad)
-        * math.sin(delta_lon / 2) ** 2
-    )
-
-    c = 2 * math.atan2(
-        math.sqrt(a),
-        math.sqrt(1 - a)
-    )
-
-    return radius * c
-
-
-def check_location(latitude, longitude):
-    """
-    ตรวจสอบว่าพิกัดอยู่ในพื้นที่โรงเรียนหรือไม่
-    """
-    if latitude is None or longitude is None:
-        return False, "-", None
+def calculate_distance_km(
+    latitude,
+    longitude
+):
 
     try:
+
         latitude = float(latitude)
         longitude = float(longitude)
 
-        distance = haversine_distance(
-            SKR_LAT,
-            SKR_LNG,
-            latitude,
-            longitude
+    except (
+        ValueError,
+        TypeError
+    ):
+
+        return None
+
+    lat_diff = latitude - SKR_LAT
+    lng_diff = longitude - SKR_LNG
+
+    distance = (
+        (
+            lat_diff ** 2
+            +
+            lng_diff ** 2
+        ) ** 0.5
+    ) * 111
+
+    return distance
+
+
+def get_location_name(
+    latitude,
+    longitude
+):
+
+    if (
+        latitude is None
+        or longitude is None
+        or latitude == ""
+        or longitude == ""
+    ):
+
+        return "-"
+
+    distance = calculate_distance_km(
+        latitude,
+        longitude
+    )
+
+    if distance is None:
+
+        return "-"
+
+    if distance <= ALLOWED_DISTANCE_KM:
+
+        return (
+            "สวนกุหลาบวิทยาลัย รังสิต "
+            "(อยู่ในพื้นที่)"
         )
 
-        if distance <= ALLOWED_DISTANCE_KM:
-            location = "สวนกุหลาบวิทยาลัย รังสิต (อยู่ในพื้นที่)"
-            return True, location, distance
-
-        location = f"อยู่นอกพื้นที่ ({distance:.2f} กม.)"
-        return False, location, distance
-
-    except (ValueError, TypeError):
-        return False, "-", None
+    return (
+        "อยู่นอกพื้นที่ "
+        "({:.2f} กม.)"
+        .format(distance)
+    )
 
 
 # =========================================================
-# TIME / PAY CALCULATION
+# ADMIN
 # =========================================================
 
-def calculate_work_hours(time_in, time_out):
-    if not time_in or not time_out:
-        return 0
+def admin_unlocked():
 
-    try:
-        start = datetime.strptime(time_in, "%H:%M:%S")
-        end = datetime.strptime(time_out, "%H:%M:%S")
-
-        if end < start:
-            end += timedelta(days=1)
-
-        seconds = (end - start).total_seconds()
-
-        return round(seconds / 3600, 2)
-
-    except Exception:
-        return 0
-
-
-def calculate_ot(work_hours):
-    if work_hours <= 8:
-        return 0
-
-    return round(work_hours - 8, 2)
-
-
-def calculate_status(time_in):
-    if not time_in:
-        return "-"
-
-    try:
-        current = datetime.strptime(
-            time_in,
-            "%H:%M:%S"
-        ).time()
-
-        limit = datetime.strptime(
-            WORK_START,
-            "%H:%M"
-        ).time()
-
-        if current <= limit:
-            return "ปกติ"
-
-        return "มาสาย"
-
-    except Exception:
-        return "-"
+    return session.get(
+        "admin_unlocked",
+        False
+    )
 
 
 # =========================================================
-# HTML LAYOUT
+# CSS
 # =========================================================
 
-BASE_HTML = """
-<!DOCTYPE html>
-<html lang="th">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport"
-      content="width=device-width, initial-scale=1.0">
-
-<title>{{ title }} - Pizza Company</title>
-
+STYLE = """
 <style>
 
 * {
@@ -297,878 +260,807 @@ BASE_HTML = """
 }
 
 body {
+
     margin: 0;
+
+    background: #f5f6fa;
+
+    color: #222;
+
     font-family:
         -apple-system,
         BlinkMacSystemFont,
         "Segoe UI",
-        Tahoma,
+        Arial,
         sans-serif;
 
-    background: #f4f5f7;
-    color: #222;
-    padding-bottom: 90px;
 }
 
 .header {
-    background: #c8102e;
+
+    background: #b91c1c;
+
     color: white;
+
     padding: 17px 20px;
-    font-size: 22px;
-    font-weight: bold;
+
+    position: sticky;
+
+    top: 0;
+
+    z-index: 20;
+
+    box-shadow:
+        0 2px 8px
+        rgba(0,0,0,.12);
+
+}
+
+.header h2 {
+
+    margin: 0;
+
+    font-size: 21px;
+
 }
 
 .container {
-    width: 94%;
-    max-width: 1100px;
-    margin: 20px auto;
+
+    width: 100%;
+
+    max-width: 1150px;
+
+    margin: auto;
+
+    padding: 18px;
+
+    padding-bottom: 100px;
+
+}
+
+h1 {
+
+    margin-top: 5px;
+
+    font-size: 27px;
+
+}
+
+h3 {
+
+    margin-top: 5px;
+
+}
+
+.cards {
+
+    display: grid;
+
+    grid-template-columns:
+        repeat(2, 1fr);
+
+    gap: 13px;
+
 }
 
 .card {
+
     background: white;
-    border-radius: 18px;
-    padding: 20px;
-    margin-bottom: 18px;
+
+    padding: 18px;
+
+    border-radius: 17px;
+
     box-shadow:
-        0 3px 15px rgba(0,0,0,0.08);
+        0 3px 12px
+        rgba(0,0,0,.07);
+
 }
 
-.card h2 {
-    margin-top: 0;
+.card-title {
+
+    color: #777;
+
+    font-size: 13px;
+
 }
 
-.grid {
-    display: grid;
-    grid-template-columns:
-        repeat(auto-fit, minmax(200px, 1fr));
-    gap: 15px;
+.card-number {
+
+    font-size: 28px;
+
+    font-weight: 800;
+
+    margin-top: 7px;
+
 }
 
-.stat {
+.panel {
+
     background: white;
-    border-radius: 18px;
-    padding: 20px;
+
+    padding: 18px;
+
+    margin-top: 15px;
+
+    border-radius: 17px;
+
     box-shadow:
-        0 3px 15px rgba(0,0,0,0.07);
+        0 3px 12px
+        rgba(0,0,0,.07);
+
 }
 
-.stat .number {
-    font-size: 30px;
-    font-weight: bold;
-    color: #c8102e;
+button,
+.btn {
+
+    border: 0;
+
+    border-radius: 11px;
+
+    padding:
+        11px 15px;
+
+    background: #b91c1c;
+
+    color: white;
+
+    text-decoration: none;
+
+    display: inline-block;
+
+    cursor: pointer;
+
+    font-size: 14px;
+
 }
 
-input,
-select {
-    width: 100%;
-    padding: 13px;
-    border: 1px solid #ddd;
-    border-radius: 10px;
-    font-size: 16px;
-    margin: 6px 0 13px;
+button:hover,
+.btn:hover {
+
+    opacity: .9;
+
+}
+
+.blue {
+
+    background: #2563eb;
+
+}
+
+.green {
+
+    background: #15803d;
+
+}
+
+.gray {
+
+    background: #6b7280;
+
+}
+
+.danger {
+
+    background: #991b1b;
+
 }
 
 label {
+
+    display: block;
+
     font-weight: 600;
+
+    margin-top: 9px;
+
 }
 
-.btn {
-    display: inline-block;
-    border: none;
-    border-radius: 10px;
-    padding: 12px 18px;
-    background: #c8102e;
-    color: white;
-    text-decoration: none;
-    cursor: pointer;
+input,
+select,
+textarea {
+
+    width: 100%;
+
+    padding: 12px;
+
+    margin:
+        6px 0 12px;
+
+    border:
+        1px solid #ddd;
+
+    border-radius: 11px;
+
     font-size: 15px;
-    margin: 3px;
+
+    background: white;
+
 }
 
-.btn.blue {
-    background: #1769e0;
+textarea {
+
+    min-height: 90px;
+
+    resize: vertical;
+
 }
 
-.btn.green {
-    background: #159447;
-}
+.table-wrap {
 
-.btn.gray {
-    background: #59636e;
-}
+    overflow-x: auto;
 
-.btn.orange {
-    background: #e88a00;
-}
-
-.btn.danger {
-    background: #b00020;
 }
 
 table {
+
     width: 100%;
-    border-collapse: collapse;
-    background: white;
+
+    min-width: 750px;
+
+    border-collapse:
+        collapse;
+
 }
 
 th,
 td {
-    padding: 12px 8px;
-    border-bottom: 1px solid #eee;
-    text-align: left;
+
+    padding: 10px;
+
+    border-bottom:
+        1px solid #eee;
+
+    text-align: center;
+
+    vertical-align: middle;
+
 }
 
 th {
-    background: #f0f1f3;
+
+    background: #f3f4f6;
+
 }
 
 .badge {
+
+    padding:
+        6px 10px;
+
+    border-radius: 30px;
+
     display: inline-block;
-    padding: 5px 10px;
-    border-radius: 20px;
-    background: #eee;
+
+    font-size: 12px;
+
 }
 
-.badge.late {
-    background: #ffe0e0;
-    color: #a40000;
+.ok {
+
+    background: #dcfce7;
+
+    color: #166534;
+
 }
 
-.badge.normal {
-    background: #dff7e6;
-    color: #08752d;
+.bad {
+
+    background: #fee2e2;
+
+    color: #991b1b;
+
 }
 
-.badge.ok {
-    background: #dcecff;
-    color: #0758b8;
+.wait {
+
+    background: #fef3c7;
+
+    color: #92400e;
+
 }
 
-.gps-box {
-    padding: 15px;
-    background: #f6f7f9;
-    border-radius: 14px;
-    margin: 10px 0;
-}
+.info-box {
 
-.notice {
-    padding: 14px;
+    background: #f8fafc;
+
+    border:
+        1px solid #e5e7eb;
+
     border-radius: 12px;
-    margin: 10px 0;
-    background: #eef5ff;
+
+    padding: 13px;
+
+    margin-top: 10px;
+
+}
+
+.success-box {
+
+    background: #ecfdf5;
+
+    color: #166534;
+
+    border-radius: 12px;
+
+    padding: 13px;
+
+}
+
+.error-box {
+
+    background: #fef2f2;
+
+    color: #991b1b;
+
+    border-radius: 12px;
+
+    padding: 13px;
+
+}
+
+.manual-item {
+
+    padding:
+        12px 0;
+
+    border-bottom:
+        1px solid #eee;
+
+}
+
+.manual-item:last-child {
+
+    border-bottom: 0;
+
 }
 
 .bottom-nav {
+
     position: fixed;
-    bottom: 0;
+
     left: 0;
+
     right: 0;
-    height: 70px;
+
+    bottom: 0;
+
+    height: 68px;
+
     background: white;
-    border-top: 1px solid #ddd;
+
+    border-top:
+        1px solid #ddd;
 
     display: flex;
-    justify-content: space-around;
+
+    justify-content:
+        space-around;
+
     align-items: center;
 
-    box-shadow: 0 -3px 15px rgba(0,0,0,0.08);
+    z-index: 30;
+
 }
 
 .bottom-nav a {
-    color: #333;
+
+    color: #555;
+
     text-decoration: none;
+
     text-align: center;
+
     font-size: 12px;
+
 }
 
 .bottom-nav span {
+
     display: block;
-    font-size: 22px;
+
+    font-size: 21px;
+
+    margin-bottom: 2px;
+
 }
 
-.login {
-    max-width: 420px;
-    margin: 80px auto;
+@media (min-width: 800px) {
+
+    .cards {
+
+        grid-template-columns:
+            repeat(4, 1fr);
+
+    }
+
 }
 
-.center {
-    text-align: center;
-}
-
-.small {
-    font-size: 13px;
-    color: #777;
-}
-
-@media(max-width: 700px) {
+@media (max-width: 500px) {
 
     .container {
-        width: 92%;
+
+        padding: 13px;
+
+        padding-bottom: 95px;
+
     }
 
-    table {
-        font-size: 13px;
+    .cards {
+
+        grid-template-columns:
+            1fr;
+
     }
 
-    th,
-    td {
-        padding: 9px 5px;
-    }
+    h1 {
 
-    .hide-mobile {
-        display: none;
+        font-size: 23px;
+
     }
 
 }
 
 </style>
+"""
+
+
+# =========================================================
+# MAIN LAYOUT
+# =========================================================
+
+LAYOUT = """
+<!doctype html>
+
+<html lang="th">
+
+<head>
+
+<meta charset="utf-8">
+
+<meta
+    name="viewport"
+    content=
+    "width=device-width,
+    initial-scale=1,
+    maximum-scale=1"
+>
+
+<meta
+    name="theme-color"
+    content="#b91c1c"
+>
+
+<link
+    rel="manifest"
+    href="/manifest.json"
+>
+
+<title>
+    Pizza Company
+</title>
+
+{{ style|safe }}
+
 </head>
 
 <body>
 
 <div class="header">
-    🍕 Pizza Company
+
+    <h2>
+        🍕 Pizza Company
+    </h2>
+
 </div>
 
 <div class="container">
 
-{{ content|safe }}
+    {{ content|safe }}
 
 </div>
 
 <div class="bottom-nav">
 
-<a href="/">
-    <span>🏠</span>
-    หน้าหลัก
-</a>
+    <a href="/">
 
-<a href="/attendance">
-    <span>⏰</span>
-    ลงเวลา
-</a>
+        <span>🏠</span>
 
-<a href="/payroll">
-    <span>📅</span>
-    บัญชี
-</a>
+        หน้าแรก
 
-<a href="/manual">
-    <span>📖</span>
-    คู่มือ
-</a>
+    </a>
 
-<a href="/logout">
-    <span>🔐</span>
-    ออก
-</a>
+    <a href="/attendance">
+
+        <span>⏰</span>
+
+        ลงเวลา
+
+    </a>
+
+    <a href="/leaves">
+
+        <span>📅</span>
+
+        ใบลา
+
+    </a>
+
+    <a href="/manual">
+
+        <span>📖</span>
+
+        คู่มือ
+
+    </a>
+
+    <a href="/admin">
+
+        <span>🔐</span>
+
+        บัญชี
+
+    </a>
 
 </div>
 
 </body>
+
 </html>
 """
 
 
-def render_page(title, content, **context):
+def page(content):
+
     return render_template_string(
-        BASE_HTML,
-        title=title,
-        content=render_template_string(
-            content,
-            **context
-        )
+
+        LAYOUT,
+
+        style=STYLE,
+
+        content=content
+
     )
 
 
 # =========================================================
-# LOGIN
+# MANIFEST
 # =========================================================
 
-@app.route("/login", methods=["GET", "POST"])
-def login():
+@app.route("/manifest.json")
+def manifest():
 
-    if request.method == "POST":
+    return jsonify({
 
-        pin = request.form.get("pin", "").strip()
+        "name":
+            "Pizza Company System",
 
-        if pin == ACCOUNT_PIN:
-            session["logged_in"] = True
-            session["role"] = "accounting"
+        "short_name":
+            "Pizza System",
 
-            return redirect("/")
+        "start_url":
+            "/",
 
-        if pin == STAFF_PIN:
-            session["logged_in"] = True
-            session["role"] = "staff"
+        "display":
+            "standalone",
 
-            return redirect("/")
+        "background_color":
+            "#f5f6fa",
 
-        return render_page(
-            "เข้าสู่ระบบ",
-            """
-            <div class="login card">
+        "theme_color":
+            "#b91c1c"
 
-                <div class="center">
-                    <h1>🍕 Pizza Company</h1>
-                    <p>เข้าสู่ระบบ</p>
-                </div>
-
-                <div class="notice">
-                    ❌ รหัสไม่ถูกต้อง
-                </div>
-
-                <form method="POST">
-
-                    <label>รหัสเข้าสู่ระบบ</label>
-
-                    <input
-                        type="password"
-                        name="pin"
-                        inputmode="numeric"
-                        placeholder="กรอกรหัส"
-                        required
-                    >
-
-                    <button class="btn" style="width:100%">
-                        🔐 เข้าสู่ระบบ
-                    </button>
-
-                </form>
-
-            </div>
-            """
-        )
-
-    return render_page(
-        "เข้าสู่ระบบ",
-        """
-        <div class="login card">
-
-            <div class="center">
-                <h1>🍕 Pizza Company</h1>
-                <p>ระบบจัดการพนักงานและลงเวลาทำงาน</p>
-            </div>
-
-            <form method="POST">
-
-                <label>รหัสเข้าสู่ระบบ</label>
-
-                <input
-                    type="password"
-                    name="pin"
-                    inputmode="numeric"
-                    placeholder="กรอกรหัส"
-                    required
-                >
-
-                <button class="btn" style="width:100%">
-                    🔐 เข้าสู่ระบบ
-                </button>
-
-            </form>
-
-            <p class="small center">
-                ผู้ใช้งานต้องมีรหัสที่ได้รับจากผู้ดูแลระบบ
-            </p>
-
-        </div>
-        """
-    )
-
-
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect("/login")
+    })
 
 
 # =========================================================
-# DASHBOARD
+# HOME
 # =========================================================
 
 @app.route("/")
-@login_required
-def index():
+def dashboard():
 
     conn = get_db()
 
-    employee_count = conn.execute("""
-        SELECT COUNT(*)
+    today = now().strftime(
+        "%Y-%m-%d"
+    )
+
+    employee_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
         FROM employees
-        WHERE active = 1
-    """).fetchone()[0]
+        """
+    ).fetchone()["n"]
 
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    attendance_count = conn.execute("""
-        SELECT COUNT(*)
+    attendance_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
         FROM attendance
-        WHERE date = ?
-    """, (today,)).fetchone()[0]
 
-    ot_total = conn.execute("""
-        SELECT COALESCE(SUM(ot_hours), 0)
+        WHERE work_date=?
+
+        AND time_in IS NOT NULL
+        """,
+        (today,)
+    ).fetchone()["n"]
+
+    late_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
         FROM attendance
-        WHERE date = ?
-    """, (today,)).fetchone()[0]
 
-    salary_total = conn.execute("""
-        SELECT COALESCE(SUM(salary), 0)
-        FROM employees
-        WHERE active = 1
-    """).fetchone()[0]
+        WHERE work_date=?
+
+        AND status='มาสาย'
+        """,
+        (today,)
+    ).fetchone()["n"]
+
+    ot_total = conn.execute(
+        """
+        SELECT
+            COALESCE(
+                SUM(ot_hours),
+                0
+            ) AS n
+
+        FROM attendance
+
+        WHERE work_date=?
+        """,
+        (today,)
+    ).fetchone()["n"]
 
     conn.close()
 
-    return render_page(
-        "หน้าหลัก",
-        """
-        <h1>🏠 หน้าหลัก</h1>
+    content = """
+    <h1>
+        📊 Dashboard
+    </h1>
 
-        <div class="grid">
+    <div class="cards">
 
-            <div class="stat">
-                <div>👥 พนักงาน</div>
-                <div class="number">
-                    {{ employee_count }}
-                </div>
-                <div class="small">คน</div>
+        <div class="card">
+
+            <div class="card-title">
+                พนักงานทั้งหมด
             </div>
 
-            <div class="stat">
-                <div>⏰ ลงเวลาวันนี้</div>
-                <div class="number">
-                    {{ attendance_count }}
-                </div>
-                <div class="small">รายการ</div>
-            </div>
-
-            <div class="stat">
-                <div>⏱️ OT วันนี้</div>
-                <div class="number">
-                    {{ "%.2f"|format(ot_total) }}
-                </div>
-                <div class="small">ชั่วโมง</div>
-            </div>
-
-            <div class="stat">
-                <div>💰 เงินเดือนรวม</div>
-                <div class="number">
-                    {{ "{:,.2f}".format(salary_total) }}
-                </div>
-                <div class="small">บาท / เดือน</div>
+            <div class="card-number">
+                {{ employee_count }}
             </div>
 
         </div>
 
         <div class="card">
 
-            <h2>เมนูหลัก</h2>
+            <div class="card-title">
+                ลงเวลาวันนี้
+            </div>
 
-            <a class="btn" href="/attendance">
-                ⏰ ลงเวลาเข้า–ออก
-            </a>
-
-            <a class="btn blue" href="/employees">
-                👥 จัดการพนักงาน
-            </a>
-
-            <a class="btn green" href="/payroll">
-                💰 ฝ่ายบัญชี
-            </a>
-
-            <a class="btn gray" href="/manual">
-                📖 คู่มือการใช้งาน
-            </a>
-
-        </div>
-
-        <div class="card">
-
-            <h2>📌 สถานะระบบ</h2>
-
-            <p>
-                ระบบลงเวลาและจัดการข้อมูลพนักงานพร้อมใช้งาน
-            </p>
-
-            <p class="small">
-                ระบบจะตรวจสอบตำแหน่งก่อนลงเวลา
-                เพื่อช่วยป้องกันการลงเวลาจากนอกพื้นที่
-            </p>
-
-        </div>
-        """,
-        employee_count=employee_count,
-        attendance_count=attendance_count,
-        ot_total=ot_total,
-        salary_total=salary_total
-    )
-
-
-# =========================================================
-# EMPLOYEES
-# =========================================================
-
-@app.route("/employees")
-@accounting_required
-def employees():
-
-    conn = get_db()
-
-    rows = conn.execute("""
-        SELECT *
-        FROM employees
-        WHERE active = 1
-        ORDER BY id
-    """).fetchall()
-
-    conn.close()
-
-    return render_page(
-        "พนักงาน",
-        """
-        <h1>👥 พนักงาน</h1>
-
-        <div class="card">
-
-            <a class="btn green" href="/employees/add">
-                ➕ เพิ่มพนักงาน
-            </a>
-
-        </div>
-
-        <div class="card">
-
-            <div style="overflow-x:auto">
-
-            <table>
-
-                <tr>
-                    <th>รหัส</th>
-                    <th>ชื่อ</th>
-                    <th>ฝ่าย</th>
-                    <th>เงินเดือน</th>
-                    <th>จัดการ</th>
-                </tr>
-
-                {% for r in rows %}
-
-                <tr>
-
-                    <td>{{ r["id"] }}</td>
-
-                    <td>{{ r["name"] }}</td>
-
-                    <td>{{ r["department"] or "-" }}</td>
-
-                    <td>
-                        {{ "{:,.2f}".format(r["salary"]) }}
-                    </td>
-
-                    <td>
-
-                        <a
-                            class="btn blue"
-                            href="/employees/edit/{{ r['id'] }}"
-                        >
-                            แก้ไข
-                        </a>
-
-                        <a
-                            class="btn danger"
-                            href="/employees/delete/{{ r['id'] }}"
-                            onclick="return confirm('ยืนยันการลบพนักงาน?')"
-                        >
-                            ลบ
-                        </a>
-
-                    </td>
-
-                </tr>
-
-                {% endfor %}
-
-            </table>
-
+            <div class="card-number">
+                {{ attendance_count }}
             </div>
 
         </div>
-        """,
-        rows=rows
-    )
-
-
-@app.route("/employees/add", methods=["GET", "POST"])
-@accounting_required
-def add_employee():
-
-    if request.method == "POST":
-
-        employee_id = request.form.get("id", "").strip()
-        name = request.form.get("name", "").strip()
-        department = request.form.get(
-            "department",
-            "พนักงาน"
-        ).strip()
-
-        try:
-            salary = float(
-                request.form.get("salary", "0")
-            )
-        except ValueError:
-            salary = 0
-
-        if not employee_id or not name:
-            return render_page(
-                "เพิ่มพนักงาน",
-                """
-                <div class="card">
-                    <h2>❌ กรุณากรอกข้อมูลให้ครบ</h2>
-                    <a class="btn" href="/employees/add">
-                        กลับ
-                    </a>
-                </div>
-                """
-            )
-
-        conn = get_db()
-
-        try:
-
-            conn.execute("""
-                INSERT INTO employees
-                (id, name, salary, department, active, created_at)
-                VALUES (?, ?, ?, ?, 1, ?)
-            """, (
-                employee_id,
-                name,
-                salary,
-                department,
-                datetime.now().strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
-            ))
-
-            conn.commit()
-
-        except sqlite3.IntegrityError:
-
-            conn.close()
-
-            return render_page(
-                "เพิ่มพนักงาน",
-                """
-                <div class="card">
-                    <h2>❌ รหัสพนักงานนี้มีอยู่แล้ว</h2>
-                    <a class="btn" href="/employees/add">
-                        กลับ
-                    </a>
-                </div>
-                """
-            )
-
-        conn.close()
-
-        return redirect("/employees")
-
-    return render_page(
-        "เพิ่มพนักงาน",
-        """
-        <h1>➕ เพิ่มพนักงาน</h1>
 
         <div class="card">
 
-        <form method="POST">
+            <div class="card-title">
+                มาสายวันนี้
+            </div>
 
-            <label>รหัสพนักงาน</label>
-            <input
-                name="id"
-                placeholder="เช่น 003"
-                required
+            <div class="card-number">
+                {{ late_count }}
+            </div>
+
+        </div>
+
+        <div class="card">
+
+            <div class="card-title">
+                OT วันนี้
+            </div>
+
+            <div class="card-number">
+                {{ "%.2f"|format(ot_total or 0) }}
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <div class="panel">
+
+        <h3>
+            👋 ยินดีต้อนรับ
+        </h3>
+
+        <p>
+            ระบบบริหารจัดการพนักงาน
+            และบัญชีของ Pizza Company
+        </p>
+
+        <p>
+            สามารถลงเวลา
+            จัดการพนักงาน
+            คำนวณเงินเดือน
+            บันทึกการลา
+            และดูรายงานได้
+        </p>
+
+    </div>
+
+
+    <div class="panel">
+
+        <h3>
+            ⚡ เมนูด่วน
+        </h3>
+
+        <p>
+
+            <a
+                class="btn"
+                href="/attendance"
             >
-
-            <label>ชื่อพนักงาน</label>
-            <input
-                name="name"
-                placeholder="ชื่อ-นามสกุล"
-                required
-            >
-
-            <label>ฝ่าย</label>
-            <input
-                name="department"
-                placeholder="เช่น ฝ่ายบัญชี"
-            >
-
-            <label>เงินเดือน</label>
-            <input
-                name="salary"
-                type="number"
-                step="0.01"
-                value="15000"
-            >
-
-            <button class="btn green">
-                💾 บันทึก
-            </button>
-
-            <a class="btn gray" href="/employees">
-                ยกเลิก
+                ⏰ ลงเวลา
             </a>
 
-        </form>
+            <a
+                class="btn blue"
+                href="/leaves"
+            >
+                📅 ยื่นใบลา
+            </a>
 
-        </div>
-        """
-    )
+            <a
+                class="btn green"
+                href="/manual"
+            >
+                📖 คู่มือ
+            </a>
 
+        </p>
 
-@app.route("/employees/edit/<employee_id>", methods=["GET", "POST"])
-@accounting_required
-def edit_employee(employee_id):
+    </div>
+    """
 
-    conn = get_db()
+    return page(
 
-    employee = conn.execute("""
-        SELECT *
-        FROM employees
-        WHERE id = ?
-    """, (employee_id,)).fetchone()
+        render_template_string(
 
-    if not employee:
-        conn.close()
+            content,
 
-        return render_page(
-            "ไม่พบพนักงาน",
-            """
-            <div class="card">
-                <h2>ไม่พบข้อมูลพนักงาน</h2>
-            </div>
-            """
+            employee_count=
+                employee_count,
+
+            attendance_count=
+                attendance_count,
+
+            late_count=
+                late_count,
+
+            ot_total=
+                ot_total
+
         )
-
-    if request.method == "POST":
-
-        name = request.form.get("name", "").strip()
-        department = request.form.get(
-            "department",
-            "พนักงาน"
-        ).strip()
-
-        try:
-            salary = float(
-                request.form.get("salary", "0")
-            )
-        except ValueError:
-            salary = 0
-
-        conn.execute("""
-            UPDATE employees
-            SET name = ?,
-                salary = ?,
-                department = ?
-            WHERE id = ?
-        """, (
-            name,
-            salary,
-            department,
-            employee_id
-        ))
-
-        conn.commit()
-        conn.close()
-
-        return redirect("/employees")
-
-    conn.close()
-
-    return render_page(
-        "แก้ไขพนักงาน",
-        """
-        <h1>✏️ แก้ไขพนักงาน</h1>
-
-        <div class="card">
-
-        <form method="POST">
-
-            <label>รหัสพนักงาน</label>
-
-            <input
-                value="{{ employee['id'] }}"
-                disabled
-            >
-
-            <label>ชื่อพนักงาน</label>
-
-            <input
-                name="name"
-                value="{{ employee['name'] }}"
-                required
-            >
-
-            <label>ฝ่าย</label>
-
-            <input
-                name="department"
-                value="{{ employee['department'] or '' }}"
-            >
-
-            <label>เงินเดือน</label>
-
-            <input
-                name="salary"
-                type="number"
-                step="0.01"
-                value="{{ employee['salary'] }}"
-            >
-
-            <button class="btn green">
-                💾 บันทึกการแก้ไข
-            </button>
-
-        </form>
-
-        </div>
-        """,
-        employee=employee
     )
-
-
-@app.route("/employees/delete/<employee_id>")
-@accounting_required
-def delete_employee(employee_id):
-
-    conn = get_db()
-
-    conn.execute("""
-        UPDATE employees
-        SET active = 0
-        WHERE id = ?
-    """, (employee_id,))
-
-    conn.commit()
-    conn.close()
-
-    return redirect("/employees")
 
 
 # =========================================================
 # ATTENDANCE
 # =========================================================
 
-@app.route("/attendance", methods=["GET", "POST"])
-@login_required
+@app.route(
+    "/attendance",
+    methods=["GET", "POST"]
+)
 def attendance():
 
-    conn = get_db()
-
-    employees = conn.execute("""
-        SELECT *
-        FROM employees
-        WHERE active = 1
-        ORDER BY id
-    """).fetchall()
+    message = ""
 
     if request.method == "POST":
 
@@ -1179,938 +1071,3030 @@ def attendance():
 
         action = request.form.get(
             "action",
-            ""
-        ).strip()
-
-        latitude = request.form.get("latitude")
-        longitude = request.form.get("longitude")
-
-        inside, location, distance = check_location(
-            latitude,
-            longitude
+            "check_in"
         )
 
-        # ต้องตรวจ GPS ก่อนลงเวลา
-        if not inside:
+        latitude = request.form.get(
+            "latitude"
+        )
 
-            conn.close()
+        longitude = request.form.get(
+            "longitude"
+        )
 
-            return render_page(
-                "ตรวจสอบตำแหน่ง",
-                """
-                <div class="card">
+        conn = get_db()
 
-                    <h2>📍 ไม่สามารถลงเวลาได้</h2>
-
-                    {% if location == "-" %}
-
-                    <div class="notice">
-                        ❌ ไม่ได้รับตำแหน่ง GPS
-                    </div>
-
-                    <p>
-                        กรุณากด "ตรวจตำแหน่ง"
-                        และอนุญาตให้เบราว์เซอร์เข้าถึงตำแหน่ง
-                    </p>
-
-                    {% else %}
-
-                    <div class="notice">
-                        ❌ {{ location }}
-                    </div>
-
-                    <p>
-                        ระบบอนุญาตให้ลงเวลา
-                        เฉพาะบริเวณโรงเรียนภายใน 300 เมตร
-                    </p>
-
-                    {% endif %}
-
-                    <a
-                        class="btn"
-                        href="/attendance"
-                    >
-                        กลับไปลงเวลา
-                    </a>
-
-                </div>
-                """,
-                location=location
-            )
-
-        employee = conn.execute("""
+        employee = conn.execute(
+            """
             SELECT *
             FROM employees
-            WHERE id = ?
-              AND active = 1
-        """, (employee_id,)).fetchone()
+            WHERE id=?
+            """,
+            (employee_id,)
+        ).fetchone()
 
-        if not employee:
+        if employee is None:
 
             conn.close()
 
-            return render_page(
-                "ข้อผิดพลาด",
+            return page(
                 """
-                <div class="card">
-                    <h2>❌ ไม่พบพนักงาน</h2>
-                    <a class="btn" href="/attendance">
-                        กลับ
-                    </a>
+                <div class="error-box">
+                    ❌ ไม่พบรหัสพนักงาน
                 </div>
                 """
             )
 
-        today = datetime.now().strftime("%Y-%m-%d")
-        now = datetime.now().strftime("%H:%M:%S")
+        today = now().strftime(
+            "%Y-%m-%d"
+        )
 
-        existing = conn.execute("""
+        current_time = now().strftime(
+            "%H:%M:%S"
+        )
+
+        record = conn.execute(
+            """
             SELECT *
             FROM attendance
-            WHERE employee_id = ?
-              AND date = ?
-            ORDER BY id DESC
-            LIMIT 1
-        """, (
-            employee_id,
-            today
-        )).fetchone()
 
-        if action == "in":
-
-            if existing and existing["time_in"]:
-
-                conn.close()
-
-                return render_page(
-                    "ลงเวลา",
-                    """
-                    <div class="card">
-                        <h2>⚠️ ลงเวลาเข้าแล้ว</h2>
-                        <p>
-                            พนักงานคนนี้มีเวลาเข้า
-                            ในวันนี้แล้ว
-                        </p>
-                        <a class="btn" href="/attendance">
-                            กลับ
-                        </a>
-                    </div>
-                    """
-                )
-
-            status = calculate_status(now)
-
-            conn.execute("""
-                INSERT INTO attendance
-                (
-                    employee_id,
-                    date,
-                    time_in,
-                    status,
-                    location,
-                    distance_km
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
+            WHERE employee_id=?
+            AND work_date=?
+            """,
+            (
                 employee_id,
-                today,
-                now,
-                status,
-                location,
-                distance or 0
-            ))
-
-            conn.commit()
-
-        elif action == "out":
-
-            if not existing or not existing["time_in"]:
-
-                conn.close()
-
-                return render_page(
-                    "ลงเวลา",
-                    """
-                    <div class="card">
-                        <h2>⚠️ ยังไม่มีเวลาเข้า</h2>
-                        <p>
-                            ต้องลงเวลาเข้าก่อน
-                            จึงจะลงเวลาออกได้
-                        </p>
-                        <a class="btn" href="/attendance">
-                            กลับ
-                        </a>
-                    </div>
-                    """
-                )
-
-            if existing["time_out"]:
-
-                conn.close()
-
-                return render_page(
-                    "ลงเวลา",
-                    """
-                    <div class="card">
-                        <h2>⚠️ ลงเวลาออกแล้ว</h2>
-                        <a class="btn" href="/attendance">
-                            กลับ
-                        </a>
-                    </div>
-                    """
-                )
-
-            work_hours = calculate_work_hours(
-                existing["time_in"],
-                now
+                today
             )
+        ).fetchone()
 
-            ot_hours = calculate_ot(work_hours)
+        # -------------------------------------------------
+        # CHECK IN
+        # -------------------------------------------------
 
-            conn.execute("""
-                UPDATE attendance
-                SET time_out = ?,
-                    work_hours = ?,
-                    ot_hours = ?
-                WHERE id = ?
-            """, (
-                now,
-                work_hours,
-                ot_hours,
-                existing["id"]
-            ))
+        if action == "check_in":
 
-            conn.commit()
+            if record is not None:
 
-    today = datetime.now().strftime("%Y-%m-%d")
+                message = """
+                <div class="error-box">
+                    ⚠️ พนักงานคนนี้
+                    ลงเวลาเข้าแล้ววันนี้
+                </div>
+                """
 
-    records = conn.execute("""
+            else:
+
+                location = get_location_name(
+                    latitude,
+                    longitude
+                )
+
+                # เวลาเกิน 08:00 ถือว่าสาย
+                if current_time <= "08:00:00":
+
+                    status = "ปกติ"
+
+                else:
+
+                    status = "มาสาย"
+
+                conn.execute(
+                    """
+                    INSERT INTO attendance
+                    (
+                        employee_id,
+                        work_date,
+                        time_in,
+                        status,
+                        latitude,
+                        longitude,
+                        location
+                    )
+
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        employee_id,
+                        today,
+                        current_time,
+                        status,
+                        float(latitude)
+                        if latitude
+                        else None,
+                        float(longitude)
+                        if longitude
+                        else None,
+                        location
+                    )
+                )
+
+                conn.commit()
+
+                status_class = (
+                    "ok"
+                    if status == "ปกติ"
+                    else "bad"
+                )
+
+                message_template = """
+                <div class="success-box">
+
+                    <h3>
+                        ✅ ลงเวลาเข้าสำเร็จ
+                    </h3>
+
+                    <p>
+                        พนักงาน:
+                        <b>{{ name }}</b>
+                    </p>
+
+                    <p>
+                        เวลา:
+                        <b>{{ time }}</b>
+                    </p>
+
+                    <p>
+                        สถานะ:
+
+                        <span
+                            class="badge {{ status_class }}"
+                        >
+                            {{ status }}
+                        </span>
+
+                    </p>
+
+                    <p>
+                        📍
+                        <b>{{ location }}</b>
+                    </p>
+
+                </div>
+                """
+
+                message = render_template_string(
+                    message_template,
+
+                    name=employee["name"],
+
+                    time=current_time,
+
+                    status=status,
+
+                    status_class=status_class,
+
+                    location=location
+
+                )
+
+        # -------------------------------------------------
+        # CHECK OUT
+        # -------------------------------------------------
+
+        elif action == "check_out":
+
+            if record is None:
+
+                message = """
+                <div class="error-box">
+
+                    ⚠️
+                    ยังไม่มีข้อมูล
+                    ลงเวลาเข้าวันนี้
+
+                </div>
+                """
+
+            elif record["time_out"]:
+
+                message = """
+                <div class="error-box">
+
+                    ⚠️
+                    ลงเวลาออกไปแล้ววันนี้
+
+                </div>
+                """
+
+            else:
+
+                try:
+
+                    start = datetime.strptime(
+                        record["time_in"],
+                        "%H:%M:%S"
+                    )
+
+                    end = datetime.strptime(
+                        current_time,
+                        "%H:%M:%S"
+                    )
+
+                    seconds = (
+                        end - start
+                    ).total_seconds()
+
+                    work_hours = (
+                        seconds / 3600
+                    )
+
+                    if work_hours < 0:
+
+                        work_hours = 0
+
+                except (
+                    ValueError,
+                    TypeError
+                ):
+
+                    work_hours = 0
+
+                if work_hours > 8:
+
+                    ot_hours = (
+                        work_hours - 8
+                    )
+
+                else:
+
+                    ot_hours = 0
+
+                location = get_location_name(
+                    latitude,
+                    longitude
+                )
+
+                if location == "-":
+
+                    location = (
+                        record["location"]
+                        or "-"
+                    )
+
+                conn.execute(
+                    """
+                    UPDATE attendance
+
+                    SET
+                        time_out=?,
+                        work_hours=?,
+                        ot_hours=?,
+                        latitude=?,
+                        longitude=?,
+                        location=?
+
+                    WHERE id=?
+                    """,
+                    (
+                        current_time,
+                        work_hours,
+                        ot_hours,
+                        float(latitude)
+                        if latitude
+                        else record["latitude"],
+                        float(longitude)
+                        if longitude
+                        else record["longitude"],
+                        location,
+                        record["id"]
+                    )
+                )
+
+                conn.commit()
+
+                message_template = """
+                <div class="success-box">
+
+                    <h3>
+                        ✅ ลงเวลาออกสำเร็จ
+                    </h3>
+
+                    <p>
+                        พนักงาน:
+                        <b>{{ name }}</b>
+                    </p>
+
+                    <p>
+                        เวลาออก:
+                        <b>{{ time }}</b>
+                    </p>
+
+                    <p>
+                        ชั่วโมงทำงาน:
+                        <b>
+                            {{ "%.2f"|format(hours) }}
+                        </b>
+                        ชั่วโมง
+                    </p>
+
+                    <p>
+                        OT:
+                        <b>
+                            {{ "%.2f"|format(ot) }}
+                        </b>
+                        ชั่วโมง
+                    </p>
+
+                    <p>
+                        📍
+                        <b>{{ location }}</b>
+                    </p>
+
+                </div>
+                """
+
+                message = render_template_string(
+                    message_template,
+
+                    name=employee["name"],
+
+                    time=current_time,
+
+                    hours=work_hours,
+
+                    ot=ot_hours,
+
+                    location=location
+
+                )
+
+        conn.close()
+
+    # -----------------------------------------------------
+    # LOAD DATA
+    # -----------------------------------------------------
+
+    conn = get_db()
+
+    today = now().strftime(
+        "%Y-%m-%d"
+    )
+
+    employees = conn.execute(
+        """
+        SELECT *
+        FROM employees
+        ORDER BY name
+        """
+    ).fetchall()
+
+    records = conn.execute(
+        """
         SELECT
-            a.*,
-            e.name AS employee_name
+
+            a.id,
+            a.employee_id,
+            a.work_date,
+            a.time_in,
+            a.time_out,
+            a.work_hours,
+            a.ot_hours,
+            a.status,
+            a.latitude,
+            a.longitude,
+            a.location,
+
+            e.name
+
         FROM attendance a
+
         LEFT JOIN employees e
-            ON a.employee_id = e.id
-        WHERE a.date = ?
-        ORDER BY a.id DESC
-    """, (today,)).fetchall()
+
+        ON a.employee_id = e.id
+
+        WHERE a.work_date=?
+
+        ORDER BY a.time_in DESC
+        """,
+        (today,)
+    ).fetchall()
 
     conn.close()
 
-    return render_page(
-        "ลงเวลา",
-        """
-        <h1>⏰ ลงเวลาเข้า–ออก</h1>
+    content = """
+    <h1>
+        ⏰ ลงเวลาเข้า–ออก
+    </h1>
 
-        <div class="card">
+    {{ message|safe }}
 
-            <h2>📝 ลงเวลาพนักงาน</h2>
+    <div class="panel">
 
-            <form
-                method="POST"
-                id="attendanceForm"
+        <h3>
+            📝 ลงเวลาพนักงาน
+        </h3>
+
+        <form
+            method="post"
+            id="attendanceForm"
+        >
+
+            <label>
+                รหัสพนักงาน
+            </label>
+
+            <select
+                name="employee_id"
+                required
             >
 
-                <label>รหัสพนักงาน</label>
+                <option value="">
+                    -- เลือกพนักงาน --
+                </option>
 
-                <select
-                    name="employee_id"
+                {% for e in employees %}
+
+                <option
+                    value="{{ e['id'] }}"
+                >
+
+                    {{ e['id'] }}
+                    -
+                    {{ e['name'] }}
+
+                </option>
+
+                {% endfor %}
+
+            </select>
+
+
+            <input
+                type="hidden"
+                name="latitude"
+                id="latitude"
+            >
+
+            <input
+                type="hidden"
+                name="longitude"
+                id="longitude"
+            >
+
+
+            <button
+                type="button"
+                class="btn blue"
+                onclick="getGPS()"
+            >
+                📍 ตรวจตำแหน่ง
+            </button>
+
+
+            <div
+                id="gpsStatus"
+                class="info-box"
+            >
+                กดตรวจตำแหน่งก่อนลงเวลา
+            </div>
+
+            <br>
+
+
+            <button
+                name="action"
+                value="check_in"
+            >
+                🟢 เข้างาน
+            </button>
+
+
+            <button
+                name="action"
+                value="check_out"
+                class="gray"
+            >
+                🔴 ออกงาน
+            </button>
+
+        </form>
+
+    </div>
+
+
+    <div class="panel">
+
+        <h3>
+            📋 การลงเวลาวันนี้
+        </h3>
+
+        <div class="table-wrap">
+
+        <table>
+
+            <tr>
+
+                <th>
+                    พนักงาน
+                </th>
+
+                <th>
+                    เข้า
+                </th>
+
+                <th>
+                    ออก
+                </th>
+
+                <th>
+                    สถานะ
+                </th>
+
+                <th>
+                    ชั่วโมง
+                </th>
+
+                <th>
+                    OT
+                </th>
+
+                <th>
+                    สถานที่
+                </th>
+
+            </tr>
+
+
+            {% for r in records %}
+
+            <tr>
+
+                <td>
+
+                    {{ r["employee_id"] }}
+
+                    <br>
+
+                    {{ r["name"] or "-" }}
+
+                </td>
+
+
+                <td>
+                    {{ r["time_in"] or "-" }}
+                </td>
+
+
+                <td>
+                    {{ r["time_out"] or "-" }}
+                </td>
+
+
+                <td>
+
+                    {% if r["status"] == "มาสาย" %}
+
+                    <span class="badge bad">
+                        มาสาย
+                    </span>
+
+                    {% else %}
+
+                    <span class="badge ok">
+                        {{ r["status"] or "-" }}
+                    </span>
+
+                    {% endif %}
+
+                </td>
+
+
+                <td>
+
+                    {{
+                        "%.2f"|format(
+                            r["work_hours"] or 0
+                        )
+                    }}
+
+                </td>
+
+
+                <td>
+
+                    {{
+                        "%.2f"|format(
+                            r["ot_hours"] or 0
+                        )
+                    }}
+
+                </td>
+
+
+                <td>
+
+                    {{
+                        r["location"]
+                        if "location"
+                        in r.keys()
+                        else "-"
+                    }}
+
+                </td>
+
+            </tr>
+
+
+            {% else %}
+
+            <tr>
+
+                <td colspan="7">
+
+                    ยังไม่มีข้อมูลวันนี้
+
+                </td>
+
+            </tr>
+
+            {% endfor %}
+
+        </table>
+
+        </div>
+
+    </div>
+
+
+    <script>
+
+    function getGPS() {
+
+        const status =
+            document.getElementById(
+                "gpsStatus"
+            );
+
+        if (!navigator.geolocation) {
+
+            status.innerHTML =
+                "❌ อุปกรณ์ไม่รองรับ GPS";
+
+            return;
+
+        }
+
+        status.innerHTML =
+            "📍 กำลังตรวจตำแหน่ง...";
+
+        navigator.geolocation.getCurrentPosition(
+
+            function(position) {
+
+                const lat =
+                    position.coords.latitude;
+
+                const lng =
+                    position.coords.longitude;
+
+                document.getElementById(
+                    "latitude"
+                ).value = lat;
+
+                document.getElementById(
+                    "longitude"
+                ).value = lng;
+
+                status.innerHTML =
+                    "✅ ตรวจตำแหน่งเรียบร้อย " +
+                    "สามารถลงเวลาได้";
+
+            },
+
+            function(error) {
+
+                status.innerHTML =
+                    "❌ ไม่สามารถรับตำแหน่งได้ " +
+                    "กรุณาอนุญาต Location";
+
+            },
+
+            {
+
+                enableHighAccuracy: true,
+
+                timeout: 10000,
+
+                maximumAge: 0
+
+            }
+
+        );
+
+    }
+
+    </script>
+    """
+
+    return page(
+        render_template_string(
+            content,
+
+            employees=employees,
+
+            records=records,
+
+            message=message
+        )
+    )
+
+
+# =========================================================
+# LEAVE SYSTEM
+# =========================================================
+
+@app.route(
+    "/leaves",
+    methods=["GET", "POST"]
+)
+def leaves():
+
+    message = ""
+
+    conn = get_db()
+
+    if request.method == "POST":
+
+        employee_id = request.form.get(
+            "employee_id",
+            ""
+        ).strip()
+
+        leave_type = request.form.get(
+            "leave_type",
+            ""
+        )
+
+        start_date = request.form.get(
+            "start_date",
+            ""
+        )
+
+        end_date = request.form.get(
+            "end_date",
+            ""
+        )
+
+        reason = request.form.get(
+            "reason",
+            ""
+        ).strip()
+
+        try:
+
+            start = datetime.strptime(
+                start_date,
+                "%Y-%m-%d"
+            )
+
+            end = datetime.strptime(
+                end_date,
+                "%Y-%m-%d"
+            )
+
+            days = (
+                end - start
+            ).days + 1
+
+            if days < 1:
+
+                days = 1
+
+        except (
+            ValueError,
+            TypeError
+        ):
+
+            days = 1
+
+        employee = conn.execute(
+            """
+            SELECT *
+            FROM employees
+            WHERE id=?
+            """,
+            (employee_id,)
+        ).fetchone()
+
+        if employee is None:
+
+            message = """
+            <div class="error-box">
+                ❌ ไม่พบพนักงาน
+            </div>
+            """
+
+        else:
+
+            conn.execute(
+                """
+                INSERT INTO leaves
+                (
+                    employee_id,
+                    leave_type,
+                    start_date,
+                    end_date,
+                    days,
+                    reason
+                )
+
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    employee_id,
+                    leave_type,
+                    start_date,
+                    end_date,
+                    days,
+                    reason
+                )
+            )
+
+            conn.commit()
+
+            message = """
+            <div class="success-box">
+                ✅ ส่งใบลาเรียบร้อยแล้ว
+            </div>
+            """
+
+    employees = conn.execute(
+        """
+        SELECT *
+        FROM employees
+        ORDER BY name
+        """
+    ).fetchall()
+
+    leave_rows = conn.execute(
+        """
+        SELECT
+
+            l.*,
+
+            e.name
+
+        FROM leaves l
+
+        LEFT JOIN employees e
+
+        ON l.employee_id = e.id
+
+        ORDER BY l.id DESC
+        """
+    ).fetchall()
+
+    conn.close()
+
+    content = """
+    <h1>
+        📅 ระบบลา
+    </h1>
+
+    {{ message|safe }}
+
+
+    <div class="panel">
+
+        <h3>
+            📝 ยื่นใบลา
+        </h3>
+
+        <form method="post">
+
+            <label>
+                พนักงาน
+            </label>
+
+            <select
+                name="employee_id"
+                required
+            >
+
+                <option value="">
+                    -- เลือกพนักงาน --
+                </option>
+
+                {% for e in employees %}
+
+                <option
+                    value="{{ e['id'] }}"
+                >
+
+                    {{ e['id'] }}
+                    -
+                    {{ e['name'] }}
+
+                </option>
+
+                {% endfor %}
+
+            </select>
+
+
+            <label>
+                ประเภทการลา
+            </label>
+
+            <select
+                name="leave_type"
+                required
+            >
+
+                <option value="">
+                    -- เลือกประเภท --
+                </option>
+
+                <option>
+                    ลาป่วย
+                </option>
+
+                <option>
+                    ลากิจ
+                </option>
+
+                <option>
+                    ลาพักร้อน
+                </option>
+
+            </select>
+
+
+            <label>
+                วันที่เริ่มลา
+            </label>
+
+            <input
+                type="date"
+                name="start_date"
+                required
+            >
+
+
+            <label>
+                วันที่สิ้นสุด
+            </label>
+
+            <input
+                type="date"
+                name="end_date"
+                required
+            >
+
+
+            <label>
+                เหตุผล
+            </label>
+
+            <textarea
+                name="reason"
+                placeholder="ระบุเหตุผล"
+            ></textarea>
+
+
+            <button>
+                📤 ส่งใบลา
+            </button>
+
+        </form>
+
+    </div>
+
+
+    <div class="panel">
+
+        <h3>
+            📋 รายการลา
+        </h3>
+
+        <div class="table-wrap">
+
+        <table>
+
+            <tr>
+
+                <th>
+                    พนักงาน
+                </th>
+
+                <th>
+                    ประเภท
+                </th>
+
+                <th>
+                    วันที่
+                </th>
+
+                <th>
+                    จำนวน
+                </th>
+
+                <th>
+                    สถานะ
+                </th>
+
+            </tr>
+
+
+            {% for l in leave_rows %}
+
+            <tr>
+
+                <td>
+                    {{ l["name"] or "-" }}
+                </td>
+
+                <td>
+                    {{ l["leave_type"] }}
+                </td>
+
+                <td>
+
+                    {{ l["start_date"] }}
+
+                    <br>
+
+                    ถึง
+
+                    <br>
+
+                    {{ l["end_date"] }}
+
+                </td>
+
+                <td>
+                    {{ l["days"] }}
+                    วัน
+                </td>
+
+                <td>
+
+                    {% if l["status"] == "อนุมัติ" %}
+
+                    <span class="badge ok">
+                        อนุมัติ
+                    </span>
+
+                    {% elif l["status"] == "ไม่อนุมัติ" %}
+
+                    <span class="badge bad">
+                        ไม่อนุมัติ
+                    </span>
+
+                    {% else %}
+
+                    <span class="badge wait">
+                        รออนุมัติ
+                    </span>
+
+                    {% endif %}
+
+                </td>
+
+            </tr>
+
+
+            {% else %}
+
+            <tr>
+
+                <td colspan="5">
+                    ยังไม่มีใบลา
+                </td>
+
+            </tr>
+
+            {% endfor %}
+
+        </table>
+
+        </div>
+
+    </div>
+    """
+
+    return page(
+        render_template_string(
+            content,
+
+            employees=employees,
+
+            leave_rows=leave_rows,
+
+            message=message
+        )
+    )
+
+
+# =========================================================
+# ADMIN LOGIN
+# =========================================================
+
+@app.route(
+    "/admin",
+    methods=["GET", "POST"]
+)
+def admin():
+
+    message = ""
+
+    if request.method == "POST":
+
+        password = request.form.get(
+            "password",
+            ""
+        )
+
+        if password == ADMIN_PASSWORD:
+
+            session["admin_unlocked"] = True
+
+            return redirect(
+                "/admin"
+            )
+
+        message = """
+        <div class="error-box">
+            ❌ รหัสฝ่ายบัญชีไม่ถูกต้อง
+        </div>
+        """
+
+    if not admin_unlocked():
+
+        content = """
+        <div class="panel">
+
+            <h1>
+                🔐 ฝ่ายบัญชี
+            </h1>
+
+            <p>
+                ส่วนนี้สำหรับผู้มีสิทธิ์
+                ฝ่ายบัญชี
+            </p>
+
+            {{ message|safe }}
+
+            <form method="post">
+
+                <label>
+                    รหัสฝ่ายบัญชี
+                </label>
+
+                <input
+                    type="password"
+                    name="password"
+                    placeholder="กรอกรหัส"
                     required
                 >
 
-                    <option value="">
-                        -- เลือกพนักงาน --
-                    </option>
-
-                    {% for e in employees %}
-
-                    <option value="{{ e['id'] }}">
-                        {{ e['id'] }} - {{ e['name'] }}
-                    </option>
-
-                    {% endfor %}
-
-                </select>
-
-                <input
-                    type="hidden"
-                    name="latitude"
-                    id="latitude"
-                >
-
-                <input
-                    type="hidden"
-                    name="longitude"
-                    id="longitude"
-                >
-
-                <button
-                    type="button"
-                    class="btn blue"
-                    onclick="getLocation()"
-                >
-                    📍 ตรวจตำแหน่ง
-                </button>
-
-                <div
-                    id="gpsStatus"
-                    class="gps-box"
-                >
-                    กด "ตรวจตำแหน่ง" ก่อนลงเวลา
-                </div>
-
-                <button
-                    class="btn green"
-                    name="action"
-                    value="in"
-                    type="submit"
-                    onclick="return checkGPS()"
-                >
-                    🟢 เข้างาน
-                </button>
-
-                <button
-                    class="btn gray"
-                    name="action"
-                    value="out"
-                    type="submit"
-                    onclick="return checkGPS()"
-                >
-                    🔴 ออกงาน
+                <button>
+                    🔓 เข้าสู่ระบบ
                 </button>
 
             </form>
 
         </div>
+        """
+
+        return page(
+            render_template_string(
+                content,
+                message=message
+            )
+        )
+
+    conn = get_db()
+
+    employee_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM employees
+        """
+    ).fetchone()["n"]
+
+    pending_leave = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM leaves
+
+        WHERE status='รออนุมัติ'
+        """
+    ).fetchone()["n"]
+
+    conn.close()
+
+    content = """
+    <h1>
+        👑 ฝ่ายบัญชี
+    </h1>
+
+    <div class="cards">
 
         <div class="card">
 
-            <h2>📋 การลงเวลาวันนี้</h2>
+            <div class="card-title">
+                พนักงาน
+            </div>
 
-            <div style="overflow-x:auto">
-
-            <table>
-
-                <tr>
-                    <th>พนักงาน</th>
-                    <th>เข้า</th>
-                    <th>ออก</th>
-                    <th>สถานะ</th>
-                    <th>ชั่วโมง</th>
-                    <th>OT</th>
-                    <th>สถานที่</th>
-                </tr>
-
-                {% for r in records %}
-
-                <tr>
-
-                    <td>
-                        {{ r["employee_id"] }}
-                        <br>
-                        <span class="small">
-                            {{ r["employee_name"] or "-" }}
-                        </span>
-                    </td>
-
-                    <td>
-                        {{ r["time_in"] or "-" }}
-                    </td>
-
-                    <td>
-                        {{ r["time_out"] or "-" }}
-                    </td>
-
-                    <td>
-
-                        {% if r["status"] == "มาสาย" %}
-
-                        <span class="badge late">
-                            มาสาย
-                        </span>
-
-                        {% elif r["status"] == "ปกติ" %}
-
-                        <span class="badge normal">
-                            ปกติ
-                        </span>
-
-                        {% else %}
-
-                        <span class="badge">
-                            -
-                        </span>
-
-                        {% endif %}
-
-                    </td>
-
-                    <td>
-                        {{ "%.2f"|format(r["work_hours"] or 0) }}
-                    </td>
-
-                    <td>
-                        {{ "%.2f"|format(r["ot_hours"] or 0) }}
-                    </td>
-
-                    <td>
-                        {{ r["location"] or "-" }}
-                    </td>
-
-                </tr>
-
-                {% endfor %}
-
-            </table>
-
+            <div class="card-number">
+                {{ employee_count }}
             </div>
 
         </div>
 
-        <script>
+        <div class="card">
 
-        function getLocation() {
+            <div class="card-title">
+                ใบรออนุมัติ
+            </div>
 
-            const status =
-                document.getElementById("gpsStatus");
+            <div class="card-number">
+                {{ pending_leave }}
+            </div>
 
-            if (!navigator.geolocation) {
+        </div>
 
-                status.innerHTML =
-                    "❌ อุปกรณ์นี้ไม่รองรับ GPS";
-
-                return;
-            }
-
-            status.innerHTML =
-                "📍 กำลังตรวจตำแหน่ง...";
-
-            navigator.geolocation.getCurrentPosition(
-
-                function(position) {
-
-                    document.getElementById(
-                        "latitude"
-                    ).value =
-                        position.coords.latitude;
-
-                    document.getElementById(
-                        "longitude"
-                    ).value =
-                        position.coords.longitude;
-
-                    const accuracy =
-                        Math.round(
-                            position.coords.accuracy
-                        );
-
-                    status.innerHTML =
-                        "✅ ตรวจตำแหน่งสำเร็จ " +
-                        "(ความแม่นยำประมาณ " +
-                        accuracy +
-                        " เมตร)";
-
-                },
-
-                function(error) {
-
-                    status.innerHTML =
-                        "❌ ไม่สามารถรับตำแหน่งได้ " +
-                        "กรุณาเปิด Location";
-
-                },
-
-                {
-                    enableHighAccuracy: true,
-                    timeout: 15000,
-                    maximumAge: 0
-                }
-            );
-        }
+    </div>
 
 
-        function checkGPS() {
+    <div class="panel">
 
-            const lat =
-                document.getElementById(
-                    "latitude"
-                ).value;
+        <h3>
+            🛠️ จัดการระบบ
+        </h3>
 
-            const lng =
-                document.getElementById(
-                    "longitude"
-                ).value;
+        <p>
+            <a
+                class="btn blue"
+                href="/employees"
+            >
+                👥 พนักงาน
+            </a>
+        </p>
 
-            if (!lat || !lng) {
+        <p>
+            <a
+                class="btn"
+                href="/salary"
+            >
+                💰 เงินเดือน + OT
+            </a>
+        </p>
 
-                alert(
-                    "กรุณากดตรวจตำแหน่ง GPS ก่อน"
-                );
+        <p>
+            <a
+                class="btn green"
+                href="/reports"
+            >
+                📊 รายงาน
+            </a>
+        </p>
 
-                return false;
-            }
+        <p>
+            <a
+                class="btn gray"
+                href="/approve_leaves"
+            >
+                📅 อนุมัติใบลา
+            </a>
+        </p>
 
-            return true;
-        }
+        <p>
+            <a
+                class="btn danger"
+                href="/admin_logout"
+            >
+                🔒 ออกจากฝ่ายบัญชี
+            </a>
+        </p>
 
-        </script>
-        """,
-        employees=employees,
-        records=records
+    </div>
+    """
+
+    return page(
+        render_template_string(
+            content,
+
+            employee_count=
+                employee_count,
+
+            pending_leave=
+                pending_leave
+        )
     )
 
 
 # =========================================================
-# PAYROLL
+# ADMIN LOGOUT
 # =========================================================
 
-@app.route("/payroll")
-@accounting_required
-def payroll():
+@app.route(
+    "/admin_logout"
+)
+def admin_logout():
 
-    month = request.args.get(
-        "month",
-        datetime.now().strftime("%Y-%m")
-    )
+    session.clear()
+
+    return redirect("/")
+
+
+# =========================================================
+# EMPLOYEE MANAGEMENT
+# =========================================================
+
+@app.route(
+    "/employees",
+    methods=["GET", "POST"]
+)
+def employees():
+
+    if not admin_unlocked():
+
+        return redirect("/admin")
 
     conn = get_db()
 
-    employees = conn.execute("""
+    message = ""
+
+    if request.method == "POST":
+
+        employee_id = request.form.get(
+            "id",
+            ""
+        ).strip()
+
+        name = request.form.get(
+            "name",
+            ""
+        ).strip()
+
+        position = request.form.get(
+            "position",
+            ""
+        ).strip()
+
+        phone = request.form.get(
+            "phone",
+            ""
+        ).strip()
+
+        start_date = request.form.get(
+            "start_date",
+            ""
+        )
+
+        try:
+
+            salary = float(
+                request.form.get(
+                    "salary",
+                    "0"
+                )
+            )
+
+        except (
+            ValueError,
+            TypeError
+        ):
+
+            salary = 0
+
+        if not employee_id or not name:
+
+            message = """
+            <div class="error-box">
+                ❌ กรุณากรอกข้อมูลให้ครบ
+            </div>
+            """
+
+        else:
+
+            try:
+
+                conn.execute(
+                    """
+                    INSERT INTO employees
+                    (
+                        id,
+                        name,
+                        position,
+                        salary,
+                        phone,
+                        start_date
+                    )
+
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        employee_id,
+                        name,
+                        position,
+                        salary,
+                        phone,
+                        start_date
+                    )
+                )
+
+                conn.commit()
+
+                message = """
+                <div class="success-box">
+                    ✅ เพิ่มพนักงานสำเร็จ
+                </div>
+                """
+
+            except sqlite3.IntegrityError:
+
+                message = """
+                <div class="error-box">
+                    ❌ รหัสพนักงานนี้มีอยู่แล้ว
+                </div>
+                """
+
+    rows = conn.execute(
+        """
         SELECT *
         FROM employees
-        WHERE active = 1
         ORDER BY id
-    """).fetchall()
+        """
+    ).fetchall()
 
-    payroll_rows = []
+    conn.close()
+
+    content = """
+    <h1>
+        👥 จัดการพนักงาน
+    </h1>
+
+    {{ message|safe }}
+
+
+    <div class="panel">
+
+        <h3>
+            ➕ เพิ่มพนักงาน
+        </h3>
+
+        <form method="post">
+
+            <label>
+                รหัสพนักงาน
+            </label>
+
+            <input
+                name="id"
+                required
+            >
+
+
+            <label>
+                ชื่อ
+            </label>
+
+            <input
+                name="name"
+                required
+            >
+
+
+            <label>
+                ตำแหน่ง
+            </label>
+
+            <input
+                name="position"
+            >
+
+
+            <label>
+                เงินเดือน
+            </label>
+
+            <input
+                type="number"
+                step="0.01"
+                name="salary"
+                value="0"
+            >
+
+
+            <label>
+                เบอร์โทร
+            </label>
+
+            <input
+                name="phone"
+            >
+
+
+            <label>
+                วันที่เริ่มงาน
+            </label>
+
+            <input
+                type="date"
+                name="start_date"
+            >
+
+
+            <button>
+                💾 เพิ่มพนักงาน
+            </button>
+
+        </form>
+
+    </div>
+
+
+    <div class="panel">
+
+        <h3>
+            📋 รายชื่อพนักงาน
+        </h3>
+
+        <div class="table-wrap">
+
+        <table>
+
+            <tr>
+
+                <th>
+                    รหัส
+                </th>
+
+                <th>
+                    ชื่อ
+                </th>
+
+                <th>
+                    ตำแหน่ง
+                </th>
+
+                <th>
+                    เงินเดือน
+                </th>
+
+                <th>
+                    จัดการ
+                </th>
+
+            </tr>
+
+
+            {% for e in rows %}
+
+            <tr>
+
+                <td>
+                    {{ e["id"] }}
+                </td>
+
+                <td>
+                    {{ e["name"] }}
+                </td>
+
+                <td>
+                    {{ e["position"] or "-" }}
+                </td>
+
+                <td>
+
+                    {{
+                        "%.2f"|format(
+                            e["salary"] or 0
+                        )
+                    }}
+
+                </td>
+
+                <td>
+
+                    <a
+                        class="btn blue"
+                        href=
+                        "/edit_employee/{{ e['id'] }}"
+                    >
+                        ✏️
+                    </a>
+
+                    <a
+                        class="btn danger"
+                        href=
+                        "/delete_employee/{{ e['id'] }}"
+                        onclick=
+                        "return confirm('ยืนยันการลบพนักงาน?')"
+                    >
+                        🗑️
+                    </a>
+
+                </td>
+
+            </tr>
+
+
+            {% else %}
+
+            <tr>
+
+                <td colspan="5">
+                    ยังไม่มีพนักงาน
+                </td>
+
+            </tr>
+
+            {% endfor %}
+
+        </table>
+
+        </div>
+
+    </div>
+    """
+
+    return page(
+        render_template_string(
+            content,
+
+            rows=rows,
+
+            message=message
+        )
+    )
+
+
+# =========================================================
+# EDIT EMPLOYEE
+# =========================================================
+
+@app.route(
+    "/edit_employee/<employee_id>",
+    methods=["GET", "POST"]
+)
+def edit_employee(employee_id):
+
+    if not admin_unlocked():
+
+        return redirect("/admin")
+
+    conn = get_db()
+
+    employee = conn.execute(
+        """
+        SELECT *
+        FROM employees
+        WHERE id=?
+        """,
+        (employee_id,)
+    ).fetchone()
+
+    if employee is None:
+
+        conn.close()
+
+        return page(
+            """
+            <div class="error-box">
+                ❌ ไม่พบพนักงาน
+            </div>
+            """
+        )
+
+    if request.method == "POST":
+
+        name = request.form.get(
+            "name",
+            ""
+        ).strip()
+
+        position = request.form.get(
+            "position",
+            ""
+        ).strip()
+
+        phone = request.form.get(
+            "phone",
+            ""
+        ).strip()
+
+        start_date = request.form.get(
+            "start_date",
+            ""
+        )
+
+        try:
+
+            salary = float(
+                request.form.get(
+                    "salary",
+                    "0"
+                )
+            )
+
+        except (
+            ValueError,
+            TypeError
+        ):
+
+            salary = 0
+
+        conn.execute(
+            """
+            UPDATE employees
+
+            SET
+                name=?,
+                position=?,
+                salary=?,
+                phone=?,
+                start_date=?
+
+            WHERE id=?
+            """,
+            (
+                name,
+                position,
+                salary,
+                phone,
+                start_date,
+                employee_id
+            )
+        )
+
+        conn.commit()
+
+        conn.close()
+
+        return redirect(
+            "/employees"
+        )
+
+    conn.close()
+
+    content = """
+    <h1>
+        ✏️ แก้ไขพนักงาน
+    </h1>
+
+    <div class="panel">
+
+        <form method="post">
+
+            <label>
+                รหัสพนักงาน
+            </label>
+
+            <input
+                value="{{ e['id'] }}"
+                disabled
+            >
+
+
+            <label>
+                ชื่อ
+            </label>
+
+            <input
+                name="name"
+                value="{{ e['name'] }}"
+                required
+            >
+
+
+            <label>
+                ตำแหน่ง
+            </label>
+
+            <input
+                name="position"
+                value=
+                "{{ e['position'] or '' }}"
+            >
+
+
+            <label>
+                เงินเดือน
+            </label>
+
+            <input
+                type="number"
+                step="0.01"
+                name="salary"
+                value=
+                "{{ e['salary'] or 0 }}"
+            >
+
+
+            <label>
+                เบอร์โทร
+            </label>
+
+            <input
+                name="phone"
+                value=
+                "{{ e['phone'] or '' }}"
+            >
+
+
+            <label>
+                วันที่เริ่มงาน
+            </label>
+
+            <input
+                type="date"
+                name="start_date"
+                value=
+                "{{ e['start_date'] or '' }}"
+            >
+
+
+            <button>
+                💾 บันทึก
+            </button>
+
+            <a
+                class="btn gray"
+                href="/employees"
+            >
+                ยกเลิก
+            </a>
+
+        </form>
+
+    </div>
+    """
+
+    return page(
+        render_template_string(
+            content,
+            e=employee
+        )
+    )
+
+
+# =========================================================
+# DELETE EMPLOYEE
+# =========================================================
+
+@app.route(
+    "/delete_employee/<employee_id>"
+)
+def delete_employee(employee_id):
+
+    if not admin_unlocked():
+
+        return redirect("/admin")
+
+    conn = get_db()
+
+    conn.execute(
+        """
+        DELETE FROM attendance
+        WHERE employee_id=?
+        """,
+        (employee_id,)
+    )
+
+    conn.execute(
+        """
+        DELETE FROM leaves
+        WHERE employee_id=?
+        """,
+        (employee_id,)
+    )
+
+    conn.execute(
+        """
+        DELETE FROM employees
+        WHERE id=?
+        """,
+        (employee_id,)
+    )
+
+    conn.commit()
+
+    conn.close()
+
+    return redirect(
+        "/employees"
+    )
+
+
+# =========================================================
+# SALARY
+# =========================================================
+
+@app.route("/salary")
+def salary():
+
+    if not admin_unlocked():
+
+        return redirect("/admin")
+
+    conn = get_db()
+
+    month = request.args.get(
+        "month",
+        now().strftime("%Y-%m")
+    )
+
+    employees = conn.execute(
+        """
+        SELECT *
+        FROM employees
+        ORDER BY name
+        """
+    ).fetchall()
+
+    result = []
 
     for employee in employees:
 
-        total_ot = conn.execute("""
-            SELECT COALESCE(SUM(ot_hours), 0)
-            FROM attendance
-            WHERE employee_id = ?
-              AND substr(date, 1, 7) = ?
-        """, (
-            employee["id"],
-            month
-        )).fetchone()[0]
+        attendance = conn.execute(
+            """
+            SELECT
 
-        # คำนวณ OT แบบง่าย
-        hourly = (
-            employee["salary"] / 30 / 8
-            if employee["salary"]
+                COALESCE(
+                    SUM(work_hours),
+                    0
+                ) AS work_hours,
+
+                COALESCE(
+                    SUM(ot_hours),
+                    0
+                ) AS ot_hours
+
+            FROM attendance
+
+            WHERE employee_id=?
+
+            AND substr(
+                work_date,
+                1,
+                7
+            )=?
+            """,
+            (
+                employee["id"],
+                month
+            )
+        ).fetchone()
+
+        base_salary = (
+            employee["salary"]
+            or 0
+        )
+
+        work_hours = (
+            attendance["work_hours"]
+            or 0
+        )
+
+        ot_hours = (
+            attendance["ot_hours"]
+            or 0
+        )
+
+        hourly_rate = (
+            base_salary / 30 / 8
+            if base_salary > 0
             else 0
         )
 
-        ot_pay = total_ot * hourly * 1.5
+        ot_rate = (
+            hourly_rate * 1.5
+        )
 
-        total = employee["salary"] + ot_pay
+        ot_pay = (
+            ot_hours * ot_rate
+        )
 
-        payroll_rows.append({
-            "id": employee["id"],
-            "name": employee["name"],
-            "salary": employee["salary"],
-            "ot_hours": total_ot,
-            "ot_pay": ot_pay,
-            "total": total
+        total_salary = (
+            base_salary
+            + ot_pay
+        )
+
+        result.append({
+
+            "id":
+                employee["id"],
+
+            "name":
+                employee["name"],
+
+            "salary":
+                base_salary,
+
+            "work_hours":
+                work_hours,
+
+            "ot_hours":
+                ot_hours,
+
+            "ot_pay":
+                ot_pay,
+
+            "total":
+                total_salary
+
         })
 
     conn.close()
 
-    return render_page(
-        "ฝ่ายบัญชี",
-        """
-        <h1>💰 ฝ่ายบัญชี</h1>
+    content = """
+    <h1>
+        💰 เงินเดือน + OT
+    </h1>
 
-        <div class="card">
 
-            <form method="GET">
+    <div class="panel">
 
-                <label>
-                    เดือน
-                </label>
+        <form method="get">
 
-                <input
-                    type="month"
-                    name="month"
-                    value="{{ month }}"
-                >
+            <label>
+                เดือน
+            </label>
 
-                <button class="btn blue">
-                    🔎 ดูข้อมูล
-                </button>
+            <input
+                type="month"
+                name="month"
+                value="{{ month }}"
+            >
 
-            </form>
+            <button>
+                🔎 ดูข้อมูล
+            </button>
+
+        </form>
+
+    </div>
+
+
+    <div class="panel">
+
+        <div class="table-wrap">
+
+        <table>
+
+            <tr>
+
+                <th>
+                    รหัส
+                </th>
+
+                <th>
+                    พนักงาน
+                </th>
+
+                <th>
+                    เงินเดือน
+                </th>
+
+                <th>
+                    ชั่วโมง
+                </th>
+
+                <th>
+                    OT
+                </th>
+
+                <th>
+                    ค่า OT
+                </th>
+
+                <th>
+                    รวม
+                </th>
+
+            </tr>
+
+
+            {% for r in result %}
+
+            <tr>
+
+                <td>
+                    {{ r["id"] }}
+                </td>
+
+                <td>
+                    {{ r["name"] }}
+                </td>
+
+                <td>
+
+                    {{
+                        "%.2f"|format(
+                            r["salary"]
+                        )
+                    }}
+
+                </td>
+
+                <td>
+
+                    {{
+                        "%.2f"|format(
+                            r["work_hours"]
+                        )
+                    }}
+
+                </td>
+
+                <td>
+
+                    {{
+                        "%.2f"|format(
+                            r["ot_hours"]
+                        )
+                    }}
+
+                </td>
+
+                <td>
+
+                    {{
+                        "%.2f"|format(
+                            r["ot_pay"]
+                        )
+                    }}
+
+                </td>
+
+                <td>
+
+                    <b>
+
+                        {{
+                            "%.2f"|format(
+                                r["total"]
+                            )
+                        }}
+
+                    </b>
+
+                </td>
+
+            </tr>
+
+
+            {% else %}
+
+            <tr>
+
+                <td colspan="7">
+                    ยังไม่มีข้อมูล
+                </td>
+
+            </tr>
+
+            {% endfor %}
+
+        </table>
 
         </div>
 
+    </div>
+    """
+
+    return page(
+        render_template_string(
+            content,
+
+            result=result,
+
+            month=month
+        )
+    )
+
+
+# =========================================================
+# APPROVE LEAVES
+# =========================================================
+
+@app.route(
+    "/approve_leaves",
+    methods=["GET", "POST"]
+)
+def approve_leaves():
+
+    if not admin_unlocked():
+
+        return redirect("/admin")
+
+    conn = get_db()
+
+    message = ""
+
+    if request.method == "POST":
+
+        leave_id = request.form.get(
+            "leave_id",
+            ""
+        )
+
+        action = request.form.get(
+            "action",
+            ""
+        )
+
+        if action == "approve":
+
+            status = "อนุมัติ"
+
+        elif action == "reject":
+
+            status = "ไม่อนุมัติ"
+
+        else:
+
+            status = "รออนุมัติ"
+
+        conn.execute(
+            """
+            UPDATE leaves
+
+            SET status=?
+
+            WHERE id=?
+            """,
+            (
+                status,
+                leave_id
+            )
+        )
+
+        conn.commit()
+
+        message = """
+        <div class="success-box">
+            ✅ เปลี่ยนสถานะใบลาแล้ว
+        </div>
+        """
+
+    rows = conn.execute(
+        """
+        SELECT
+
+            l.*,
+
+            e.name
+
+        FROM leaves l
+
+        LEFT JOIN employees e
+
+        ON l.employee_id = e.id
+
+        ORDER BY l.id DESC
+        """
+    ).fetchall()
+
+    conn.close()
+
+    content = """
+    <h1>
+        📅 อนุมัติใบลา
+    </h1>
+
+    {{ message|safe }}
+
+
+    <div class="panel">
+
+        <div class="table-wrap">
+
+        <table>
+
+            <tr>
+
+                <th>
+                    พนักงาน
+                </th>
+
+                <th>
+                    ประเภท
+                </th>
+
+                <th>
+                    วันที่
+                </th>
+
+                <th>
+                    จำนวน
+                </th>
+
+                <th>
+                    เหตุผล
+                </th>
+
+                <th>
+                    สถานะ
+                </th>
+
+                <th>
+                    จัดการ
+                </th>
+
+            </tr>
+
+
+            {% for r in rows %}
+
+            <tr>
+
+                <td>
+
+                    {{ r["employee_id"] }}
+
+                    <br>
+
+                    {{ r["name"] or "-" }}
+
+                </td>
+
+
+                <td>
+                    {{ r["leave_type"] }}
+                </td>
+
+
+                <td>
+
+                    {{ r["start_date"] }}
+
+                    <br>
+                    ถึง
+                    <br>
+
+                    {{ r["end_date"] }}
+
+                </td>
+
+
+                <td>
+
+                    {{ r["days"] }}
+                    วัน
+
+                </td>
+
+
+                <td>
+
+                    {{ r["reason"] or "-" }}
+
+                </td>
+
+
+                <td>
+
+                    {% if r["status"] == "อนุมัติ" %}
+
+                    <span class="badge ok">
+                        อนุมัติ
+                    </span>
+
+                    {% elif r["status"] == "ไม่อนุมัติ" %}
+
+                    <span class="badge bad">
+                        ไม่อนุมัติ
+                    </span>
+
+                    {% else %}
+
+                    <span class="badge wait">
+                        รออนุมัติ
+                    </span>
+
+                    {% endif %}
+
+                </td>
+
+
+                <td>
+
+                    {% if r["status"] == "รออนุมัติ" %}
+
+                    <form
+                        method="post"
+                        style="display:inline"
+                    >
+
+                        <input
+                            type="hidden"
+                            name="leave_id"
+                            value="{{ r['id'] }}"
+                        >
+
+                        <button
+                            name="action"
+                            value="approve"
+                            class="green"
+                        >
+                            ✓
+                        </button>
+
+                    </form>
+
+
+                    <form
+                        method="post"
+                        style="display:inline"
+                    >
+
+                        <input
+                            type="hidden"
+                            name="leave_id"
+                            value="{{ r['id'] }}"
+                        >
+
+                        <button
+                            name="action"
+                            value="reject"
+                            class="danger"
+                        >
+                            ✕
+                        </button>
+
+                    </form>
+
+                    {% else %}
+
+                    ดำเนินการแล้ว
+
+                    {% endif %}
+
+                </td>
+
+            </tr>
+
+
+            {% else %}
+
+            <tr>
+
+                <td colspan="7">
+                    ยังไม่มีใบลา
+                </td>
+
+            </tr>
+
+            {% endfor %}
+
+        </table>
+
+        </div>
+
+    </div>
+    """
+
+    return page(
+        render_template_string(
+            content,
+
+            rows=rows,
+
+            message=message
+        )
+    )
+
+
+# =========================================================
+# REPORTS
+# =========================================================
+
+@app.route("/reports")
+def reports():
+
+    if not admin_unlocked():
+
+        return redirect("/admin")
+
+    conn = get_db()
+
+    month = request.args.get(
+        "month",
+        now().strftime("%Y-%m")
+    )
+
+    employee_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM employees
+        """
+    ).fetchone()["n"]
+
+    attendance_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+
+        FROM attendance
+
+        WHERE substr(
+            work_date,
+            1,
+            7
+        )=?
+        """,
+        (month,)
+    ).fetchone()["n"]
+
+    late_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+
+        FROM attendance
+
+        WHERE substr(
+            work_date,
+            1,
+            7
+        )=?
+
+        AND status='มาสาย'
+        """,
+        (month,)
+    ).fetchone()["n"]
+
+    ot_total = conn.execute(
+        """
+        SELECT
+
+            COALESCE(
+                SUM(ot_hours),
+                0
+            ) AS n
+
+        FROM attendance
+
+        WHERE substr(
+            work_date,
+            1,
+            7
+        )=?
+        """,
+        (month,)
+    ).fetchone()["n"]
+
+    leave_count = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+
+        FROM leaves
+
+        WHERE substr(
+            start_date,
+            1,
+            7
+        )=?
+        """,
+        (month,)
+    ).fetchone()["n"]
+
+    rows = conn.execute(
+        """
+        SELECT
+
+            e.id,
+            e.name,
+            e.salary,
+
+            COALESCE(
+                SUM(a.work_hours),
+                0
+            ) AS work_hours,
+
+            COALESCE(
+                SUM(a.ot_hours),
+                0
+            ) AS ot_hours,
+
+            COUNT(a.id)
+                AS attendance_days,
+
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN a.status='มาสาย'
+                        THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS late_days
+
+        FROM employees e
+
+        LEFT JOIN attendance a
+
+        ON e.id = a.employee_id
+
+        AND substr(
+            a.work_date,
+            1,
+            7
+        )=?
+
+        GROUP BY
+            e.id,
+            e.name,
+            e.salary
+
+        ORDER BY e.id
+        """,
+        (month,)
+    ).fetchall()
+
+    conn.close()
+
+    content = """
+    <h1>
+        📊 รายงานระบบ
+    </h1>
+
+
+    <div class="panel">
+
+        <form method="get">
+
+            <label>
+                เลือกเดือน
+            </label>
+
+            <input
+                type="month"
+                name="month"
+                value="{{ month }}"
+            >
+
+            <button>
+                🔎 แสดงรายงาน
+            </button>
+
+        </form>
+
+    </div>
+
+
+    <div class="cards">
+
         <div class="card">
 
-            <div style="overflow-x:auto">
+            <div class="card-title">
+                พนักงาน
+            </div>
 
-            <table>
+            <div class="card-number">
+                {{ employee_count }}
+            </div>
 
-                <tr>
-                    <th>รหัส</th>
-                    <th>พนักงาน</th>
-                    <th>เงินเดือน</th>
-                    <th>OT</th>
-                    <th>ค่า OT</th>
-                    <th>รวม</th>
-                </tr>
+        </div>
 
-                {% for r in payroll_rows %}
 
-                <tr>
+        <div class="card">
 
-                    <td>{{ r["id"] }}</td>
+            <div class="card-title">
+                การลงเวลา
+            </div>
 
-                    <td>{{ r["name"] }}</td>
+            <div class="card-number">
+                {{ attendance_count }}
+            </div>
 
-                    <td>
-                        {{ "{:,.2f}".format(r["salary"]) }}
-                    </td>
+        </div>
 
-                    <td>
-                        {{ "%.2f"|format(r["ot_hours"]) }}
-                    </td>
 
-                    <td>
-                        {{ "{:,.2f}".format(r["ot_pay"]) }}
-                    </td>
+        <div class="card">
 
-                    <td>
-                        <b>
-                        {{ "{:,.2f}".format(r["total"]) }}
-                        </b>
-                    </td>
+            <div class="card-title">
+                มาสาย
+            </div>
 
-                </tr>
+            <div class="card-number">
+                {{ late_count }}
+            </div>
 
-                {% endfor %}
+        </div>
 
-            </table>
+
+        <div class="card">
+
+            <div class="card-title">
+                OT รวม
+            </div>
+
+            <div class="card-number">
+
+                {{
+                    "%.2f"|format(
+                        ot_total or 0
+                    )
+                }}
 
             </div>
 
         </div>
 
-        <div class="card">
+    </div>
 
-            <h2>ℹ️ การคำนวณ</h2>
 
-            <p>
-                ค่า OT คำนวณจากอัตราค่าจ้างต่อชั่วโมง
-                × 1.5 × จำนวนชั่วโมง OT
-            </p>
+    <div class="panel">
 
-            <p class="small">
-                ระบบนี้เป็นระบบโครงงานสำหรับการคำนวณ
-                และจัดการข้อมูลเบื้องต้น
-            </p>
+        <h3>
+            📋 รายงานรายบุคคล
+        </h3>
+
+        <div class="table-wrap">
+
+        <table>
+
+            <tr>
+
+                <th>
+                    รหัส
+                </th>
+
+                <th>
+                    ชื่อ
+                </th>
+
+                <th>
+                    เงินเดือน
+                </th>
+
+                <th>
+                    วันลงเวลา
+                </th>
+
+                <th>
+                    ชั่วโมง
+                </th>
+
+                <th>
+                    OT
+                </th>
+
+                <th>
+                    มาสาย
+                </th>
+
+            </tr>
+
+
+            {% for r in rows %}
+
+            <tr>
+
+                <td>
+                    {{ r["id"] }}
+                </td>
+
+                <td>
+                    {{ r["name"] }}
+                </td>
+
+                <td>
+
+                    {{
+                        "%.2f"|format(
+                            r["salary"] or 0
+                        )
+                    }}
+
+                </td>
+
+                <td>
+                    {{ r["attendance_days"] or 0 }}
+                </td>
+
+                <td>
+
+                    {{
+                        "%.2f"|format(
+                            r["work_hours"] or 0
+                        )
+                    }}
+
+                </td>
+
+                <td>
+
+                    {{
+                        "%.2f"|format(
+                            r["ot_hours"] or 0
+                        )
+                    }}
+
+                </td>
+
+                <td>
+                    {{ r["late_days"] or 0 }}
+                </td>
+
+            </tr>
+
+
+            {% else %}
+
+            <tr>
+
+                <td colspan="7">
+                    ยังไม่มีข้อมูล
+                </td>
+
+            </tr>
+
+            {% endfor %}
+
+        </table>
 
         </div>
-        """,
-        month=month,
-        payroll_rows=payroll_rows
+
+    </div>
+    """
+
+    return page(
+        render_template_string(
+            content,
+
+            month=month,
+
+            employee_count=
+                employee_count,
+
+            attendance_count=
+                attendance_count,
+
+            late_count=
+                late_count,
+
+            ot_total=
+                ot_total,
+
+            leave_count=
+                leave_count,
+
+            rows=rows
+        )
     )
 
 
 # =========================================================
-# MANUAL / คู่มือ
+# MANUAL / USER GUIDE
 # =========================================================
 
 @app.route("/manual")
-@login_required
 def manual():
 
-    return render_page(
-        "คู่มือการใช้งาน",
-        """
-        <h1>📖 คู่มือการใช้งาน</h1>
+    content = """
+    <h1>
+        📖 คู่มือการใช้งาน
+    </h1>
 
-        <div class="card">
 
-            <h2>1. 🔐 การเข้าสู่ระบบ</h2>
+    <div class="panel">
 
-            <p>
-                ผู้ใช้งานต้องกรอกรหัสที่ได้รับจากผู้ดูแลระบบ
-                เพื่อเข้าสู่ระบบ
-            </p>
+        <h3>
+            1. 🏠 หน้าแรก
+        </h3>
 
-            <p>
-                ระบบแบ่งสิทธิ์ออกเป็น
-            </p>
+        <div class="manual-item">
 
-            <ul>
-                <li>
-                    👤 พนักงานทั่วไป
-                    สามารถใช้งานการลงเวลาได้
-                </li>
-
-                <li>
-                    👑 ฝ่ายบัญชี
-                    สามารถจัดการข้อมูลพนักงาน
-                    และข้อมูลเงินเดือนได้
-                </li>
-            </ul>
+            หน้าแรกใช้สำหรับดูภาพรวม
+            ของระบบ เช่น จำนวนพนักงาน
+            จำนวนการลงเวลา
+            จำนวนคนมาสาย
+            และ OT ของวันนั้น
 
         </div>
 
 
-        <div class="card">
+        <h3>
+            2. ⏰ การลงเวลา
+        </h3>
 
-            <h2>2. ⏰ การลงเวลาเข้า–ออก</h2>
+        <div class="manual-item">
 
-            <ol>
+            เลือกรหัสพนักงาน
+            จากนั้นกดตรวจตำแหน่ง
+            แล้วเลือก
+            <b>เข้างาน</b>
+            หรือ
+            <b>ออกงาน</b>
 
-                <li>
-                    เลือกรหัสพนักงาน
-                </li>
+            <br><br>
 
-                <li>
-                    กด
-                    <b>📍 ตรวจตำแหน่ง</b>
-                </li>
-
-                <li>
-                    อนุญาตให้เว็บไซต์เข้าถึงตำแหน่ง
-                </li>
-
-                <li>
-                    รอจนขึ้นว่า
-                    <b>ตรวจตำแหน่งสำเร็จ</b>
-                </li>
-
-                <li>
-                    กด
-                    <b>🟢 เข้างาน</b>
-                    หรือ
-                    <b>🔴 ออกงาน</b>
-                </li>
-
-            </ol>
+            ระบบจะบันทึกเวลา
+            และตรวจสอบตำแหน่ง
+            ตามพื้นที่ที่กำหนดไว้
 
         </div>
 
 
-        <div class="card">
+        <h3>
+            3. 📅 การลา
+        </h3>
 
-            <h2>3. 📍 ระบบ GPS</h2>
+        <div class="manual-item">
 
-            <p>
-                ระบบมีการตรวจสอบตำแหน่งก่อนลงเวลา
-                เพื่อช่วยป้องกันการลงเวลาจากนอกพื้นที่
-            </p>
+            เลือกพนักงาน
+            เลือกประเภทการลา
+            กำหนดวันที่
+            และกรอกเหตุผล
+            จากนั้นกดส่งใบลา
 
-            <div class="gps-box">
+            <br><br>
 
-                <b>🏫 พื้นที่อ้างอิง</b>
-
-                <p>
-                    โรงเรียนสวนกุหลาบวิทยาลัย รังสิต
-                </p>
-
-                <b>📏 รัศมีที่อนุญาต</b>
-
-                <p>
-                    300 เมตร
-                </p>
-
-            </div>
-
-            <p>
-                หากตำแหน่งอยู่ภายในรัศมีที่กำหนด
-                ระบบจะแสดงว่า
-            </p>
-
-            <div class="notice">
-                ✅ สวนกุหลาบวิทยาลัย รังสิต
-                (อยู่ในพื้นที่)
-            </div>
-
-            <p>
-                หากอยู่ไกลเกินพื้นที่
-                ระบบจะแสดงระยะห่างโดยประมาณ เช่น
-            </p>
-
-            <div class="notice">
-                ❌ อยู่นอกพื้นที่ (3.50 กม.)
-            </div>
-
-            <p>
-                ระบบใช้การคำนวณระยะทางแบบ
-                Haversine เพื่อให้เหมาะกับการคำนวณ
-                ระยะห่างระหว่างพิกัดบนโลกมากกว่าสูตร
-                แบบคำนวณตรง ๆ
-            </p>
-
-            <p class="small">
-                หมายเหตุ:
-                GPS ของโทรศัพท์หรือแท็บเล็ตอาจมีความคลาดเคลื่อน
-                โดยเฉพาะเมื่ออยู่ภายในอาคาร
-            </p>
+            ใบลาจะมีสถานะ
+            <b>รออนุมัติ</b>
+            จนกว่าฝ่ายบัญชี
+            จะดำเนินการ
 
         </div>
 
 
-        <div class="card">
+        <h3>
+            4. 🔐 ฝ่ายบัญชี
+        </h3>
 
-            <h2>4. 🚨 การเช็กมาสาย</h2>
+        <div class="manual-item">
 
-            <p>
-                ระบบกำหนดเวลาเริ่มงานเป็น
-                <b>08:00 น.</b>
-            </p>
+            ส่วนฝ่ายบัญชีใช้สำหรับ
+            ผู้ที่มีรหัสผ่านเท่านั้น
 
-            <ul>
+            <br><br>
 
-                <li>
-                    เข้าเวลาไม่เกิน 08:00
-                    → <b>ปกติ</b>
-                </li>
-
-                <li>
-                    หลัง 08:00
-                    → <b>มาสาย</b>
-                </li>
-
-            </ul>
+            สามารถจัดการข้อมูลพนักงาน
+            เงินเดือน
+            OT
+            ใบลา
+            และรายงานได้
 
         </div>
 
 
-        <div class="card">
+        <h3>
+            5. 👥 จัดการพนักงาน
+        </h3>
 
-            <h2>5. ⏱️ ชั่วโมงทำงานและ OT</h2>
+        <div class="manual-item">
 
-            <p>
-                เมื่อพนักงานลงเวลาออก
-                ระบบจะคำนวณจำนวนชั่วโมงทำงานให้อัตโนมัติ
-            </p>
-
-            <p>
-                หากทำงานเกิน 8 ชั่วโมง
-                ส่วนที่เกินจะถูกนับเป็น OT
-            </p>
+            ฝ่ายบัญชีสามารถ
+            เพิ่ม แก้ไข และลบ
+            ข้อมูลพนักงานได้
 
         </div>
 
 
-        <div class="card">
+        <h3>
+            6. 💰 เงินเดือน
+        </h3>
 
-            <h2>6. 💰 ฝ่ายบัญชี</h2>
+        <div class="manual-item">
 
-            <p>
-                ฝ่ายบัญชีสามารถ
-            </p>
-
-            <ul>
-
-                <li>
-                    เพิ่มพนักงาน
-                </li>
-
-                <li>
-                    แก้ไขข้อมูลพนักงาน
-                </li>
-
-                <li>
-                    ลบ/ปิดใช้งานพนักงาน
-                </li>
-
-                <li>
-                    กำหนดเงินเดือน
-                </li>
-
-                <li>
-                    ดูจำนวน OT
-                </li>
-
-                <li>
-                    ดูยอดเงินเดือนรวม
-                </li>
-
-            </ul>
+            ระบบนำเงินเดือนพื้นฐาน
+            มาคำนวณร่วมกับ
+            ชั่วโมง OT
+            เพื่อแสดงยอดรวม
 
         </div>
 
 
-        <div class="card">
+        <h3>
+            7. 📊 รายงาน
+        </h3>
 
-            <h2>7. 📱 การใช้งานบนมือถือ</h2>
+        <div class="manual-item">
 
-            <p>
-                ระบบออกแบบให้รองรับโทรศัพท์
-                และแท็บเล็ต เช่น iPhone และ iPad
-            </p>
-
-            <p>
-                สามารถเปิดผ่านเบราว์เซอร์
-                แล้วเพิ่มเว็บไซต์ไว้ที่หน้าจอหลักได้
-            </p>
-
-        </div>
-
-
-        <div class="card">
-
-            <h2>8. ⚠️ หาก GPS ไม่ทำงาน</h2>
-
-            <ol>
-
-                <li>
-                    ตรวจสอบว่าเปิด Location แล้ว
-                </li>
-
-                <li>
-                    อนุญาต Location ให้เบราว์เซอร์
-                </li>
-
-                <li>
-                    อยู่ในบริเวณที่รับสัญญาณ GPS ได้
-                </li>
-
-                <li>
-                    กดตรวจตำแหน่งใหม่อีกครั้ง
-                </li>
-
-            </ol>
+            สามารถเลือกเดือน
+            เพื่อดูข้อมูลการทำงาน
+            จำนวนครั้งลงเวลา
+            การมาสาย
+            ชั่วโมง OT
+            และข้อมูลพนักงาน
 
         </div>
 
 
-        <div class="card">
+        <div class="info-box">
 
-            <h2>9. 🔒 ความปลอดภัย</h2>
-
-            <p>
-                ผู้ที่ไม่มีรหัสเข้าสู่ระบบจะไม่สามารถ
-                เข้าหน้าระบบได้
-            </p>
-
-            <p>
-                ส่วนจัดการข้อมูลพนักงานและฝ่ายบัญชี
-                จำกัดไว้สำหรับบัญชีฝ่ายบัญชี
-            </p>
+            💡
+            หากพบปัญหาในการใช้งาน
+            ให้ตรวจสอบการเชื่อมต่ออินเทอร์เน็ต
+            และสิทธิ์การเข้าถึง Location
+            ของอุปกรณ์
 
         </div>
 
-        """
+    </div>
+    """
+
+    return page(
+        render_template_string(
+            content
+        )
     )
-
-
-# =========================================================
-# HEALTH CHECK FOR RENDER
-# =========================================================
-
-@app.route("/health")
-def health():
-    return jsonify({
-        "status": "ok",
-        "service": "pizza-company-system"
-    })
 
 
 # =========================================================
@@ -2120,19 +4104,19 @@ def health():
 @app.errorhandler(404)
 def page_not_found(error):
 
-    return render_page(
-        "ไม่พบหน้า",
+    return page(
         """
-        <div class="card center">
-
-            <h1>404</h1>
+        <div class="error-box">
 
             <h2>
-                ไม่พบหน้าที่ต้องการ
+                ❌ ไม่พบหน้าที่ต้องการ
             </h2>
 
-            <a class="btn" href="/">
-                🏠 กลับหน้าหลัก
+            <a
+                class="btn"
+                href="/"
+            >
+                🏠 กลับหน้าแรก
             </a>
 
         </div>
@@ -2141,23 +4125,25 @@ def page_not_found(error):
 
 
 @app.errorhandler(500)
-def server_error(error):
+def internal_error(error):
 
-    return render_page(
-        "เกิดข้อผิดพลาด",
+    return page(
         """
-        <div class="card center">
+        <div class="error-box">
 
             <h2>
-                ❌ เกิดข้อผิดพลาดในระบบ
+                ❌ เกิดข้อผิดพลาด
             </h2>
 
             <p>
                 กรุณาลองใหม่อีกครั้ง
             </p>
 
-            <a class="btn" href="/">
-                🏠 กลับหน้าหลัก
+            <a
+                class="btn"
+                href="/"
+            >
+                🏠 กลับหน้าแรก
             </a>
 
         </div>
@@ -2166,11 +4152,15 @@ def server_error(error):
 
 
 # =========================================================
-# START
+# START DATABASE
 # =========================================================
 
 init_db()
 
+
+# =========================================================
+# RUN APP
+# =========================================================
 
 if __name__ == "__main__":
 
