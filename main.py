@@ -4013,8 +4013,32 @@ def manual():
             โดยออกแบบหน้าจอให้เหมาะกับ
             หน้าจอขนาดเล็ก
         </p>
+        <div class="card">
+            <h2>📱 วิธีติดตั้งแอปไว้บนหน้าจอมือถือ/ไอแพด</h2>
+            <p>เพื่อความสะดวกในการใช้งาน สามารถกดเพิ่มแอปไว้ที่หน้าจอหลัก (Home Screen) ได้เลย:</p>
+            
+            <p><strong>สำหรับ iOS / iPadOS (Safari):</strong></p>
+            <ul>
+                <li>1. เปิดเว็บด้วย <strong>Safari</strong></li>
+                <li>2. กดปุ่ม <strong>แชร์ (Share)</strong> <i>(รูปสี่เหลี่ยมที่มีลูกศรชี้ขึ้น)</i></li>
+                <li>3. เลื่อนลงมาเลือก <strong>"เพิ่มไปยังหน้าจอโฮม" (Add to Home Screen)</strong></li>
+                <li>4. กด <strong>"เพิ่ม" (Add)</strong> มุมขวาบน</li>
+            </ul>
 
-    </div>
+            <p><strong>สำหรับ Android (Chrome):</strong></p>
+            <ul>
+                <li>1. เปิดเว็บด้วย <strong>Chrome</strong></li>
+                <li>2. กดปุ่ม <strong>เมนู (จุด 3 จุด)</strong> มุมขวาบน</li>
+                <li>3. เลือก <strong>"ติดตั้งแอป" (Install App)</strong> หรือ <strong>"เพิ่มลงในหน้าจอโฮม"</strong></li>
+                <li>4. กด <strong>"ยืนยัน / เพิ่ม"</strong></li>
+            </ul>
+
+            <div class="notice">
+                💡 เมื่อติดตั้งแล้ว ไอคอนแอปจะไปขึ้นที่หน้าจอหลัก สามารถกดเข้าใช้งานได้ทันทีเหมือนแอปทั่วไปเลยครับ
+            </div>
+        </div>
+
+    
     """
 
 
@@ -4108,3 +4132,4 @@ if __name__ == "__main__":
         debug=False
     )
     
+
