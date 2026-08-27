@@ -42,7 +42,6 @@ ALLOWED_DISTANCE_KM = 0.3
 WORK_START = "08:00"
 
 # รหัสเข้าสู่ระบบ
-# สามารถเปลี่ยนบน Render ด้วย Environment Variables ได้
 STAFF_PIN = os.environ.get("STAFF_PIN", "1234")
 ACCOUNT_PIN = os.environ.get("ACCOUNT_PIN", "9999")
 
@@ -144,27 +143,20 @@ def init_db():
 
 
 # =========================================================
-# LOGIN / PERMISSION
+# LOGIN / PERMISSION (BYPASSED)
 # =========================================================
 
 def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
-        if not session.get("logged_in"):
-            return view(*args,**kwargs)
         return view(*args, **kwargs)
-
     return wrapped
 
 
 def accounting_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
-        if not session.get("logged_in"):
-            return view(*args,**kwargs)
-
-     return view(*args, **kwargs)
-
+        return view(*args, **kwargs)
     return wrapped
 
 
@@ -177,7 +169,6 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     คำนวณระยะห่างระหว่างพิกัด 2 จุด
     ผลลัพธ์เป็นกิโลเมตร
     """
-
     radius = 6371.0
 
     lat1_rad = math.radians(lat1)
@@ -206,7 +197,6 @@ def check_location(latitude, longitude):
     """
     ตรวจสอบว่าพิกัดอยู่ในพื้นที่โรงเรียนหรือไม่
     """
-
     if latitude is None or longitude is None:
         return False, "-", None
 
@@ -546,7 +536,6 @@ th {
 
 </div>
 
-{% if session.get("logged_in") %}
 <div class="bottom-nav">
 
 <a href="/">
@@ -575,7 +564,6 @@ th {
 </a>
 
 </div>
-{% endif %}
 
 </body>
 </html>
@@ -782,7 +770,6 @@ def index():
                 ⏰ ลงเวลาเข้า–ออก
             </a>
 
-            {% if session.get("role") == "accounting" %}
             <a class="btn blue" href="/employees">
                 👥 จัดการพนักงาน
             </a>
@@ -790,7 +777,6 @@ def index():
             <a class="btn green" href="/payroll">
                 💰 ฝ่ายบัญชี
             </a>
-            {% endif %}
 
             <a class="btn gray" href="/manual">
                 📖 คู่มือการใช้งาน
@@ -1711,7 +1697,6 @@ def payroll():
         )).fetchone()[0]
 
         # คำนวณ OT แบบง่าย
-        # เงินเดือน / 30 / 8 * 1.5
         hourly = (
             employee["salary"] / 30 / 8
             if employee["salary"]
@@ -1837,6 +1822,7 @@ def payroll():
 # =========================================================
 
 @app.route("/manual")
+@login_required
 def manual():
 
     return render_page(
@@ -1849,7 +1835,8 @@ def manual():
             <h2>1. 🔐 การเข้าสู่ระบบ</h2>
 
             <p>
-                พนักงานทั่วไปสามารถกดเข้าใช้งานหน้าลงเวลาได้ทันที
+                ผู้ใช้งานต้องกรอกรหัสที่ได้รับจากผู้ดูแลระบบ
+                เพื่อเข้าสู่ระบบ
             </p>
 
             <p>
@@ -2200,4 +2187,3 @@ if __name__ == "__main__":
         debug=False
     )
     
-
