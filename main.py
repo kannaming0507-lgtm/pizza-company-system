@@ -151,7 +151,7 @@ def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
         if not session.get("logged_in"):
-            return redirect(url_for("login"))
+            return view(*args,**kwargs)
         return view(*args, **kwargs)
 
     return wrapped
@@ -161,7 +161,7 @@ def accounting_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
         if not session.get("logged_in"):
-            return redirect(url_for("login"))
+            return view(*args,**kwargs)
 
         if session.get("role") != "accounting":
             return render_page(
@@ -1851,7 +1851,6 @@ def payroll():
 # =========================================================
 
 @app.route("/manual")
-@login_required
 def manual():
 
     return render_page(
@@ -1864,8 +1863,7 @@ def manual():
             <h2>1. 🔐 การเข้าสู่ระบบ</h2>
 
             <p>
-                ผู้ใช้งานต้องกรอกรหัสที่ได้รับจากผู้ดูแลระบบ
-                เพื่อเข้าสู่ระบบ
+                พนักงานทั่วไปสามารถกดเข้าใช้งานหน้าลงเวลาได้ทันที
             </p>
 
             <p>
