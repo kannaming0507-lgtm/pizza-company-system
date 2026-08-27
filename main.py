@@ -163,21 +163,7 @@ def accounting_required(view):
         if not session.get("logged_in"):
             return view(*args,**kwargs)
 
-        if session.get("role") != "accounting":
-            return render_page(
-                "ไม่มีสิทธิ์",
-                """
-                <div class="card">
-                    <h2>🔒 ไม่มีสิทธิ์เข้าถึง</h2>
-                    <p>
-                        หน้านี้สามารถใช้งานได้เฉพาะฝ่ายบัญชีเท่านั้น
-                    </p>
-                    <a class="btn" href="/">กลับหน้าหลัก</a>
-                </div>
-                """
-            )
-
-        return view(*args, **kwargs)
+     return view(*args, **kwargs)
 
     return wrapped
 
@@ -2214,3 +2200,4 @@ if __name__ == "__main__":
         debug=False
     )
     
+
