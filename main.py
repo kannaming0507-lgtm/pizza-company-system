@@ -818,6 +818,9 @@ LAYOUT = """
 <html lang="th">
 
 <head>
+    <link rel="apple-touch-icon" href="https://i.ibb.co/B5N9DBML/icon.png">
+    <link rel="icon" type="image/png" href="https://i.ibb.co/B5N9DBML/icon.png">
+
 
 <meta charset="utf-8">
 
@@ -4131,5 +4134,6 @@ if __name__ == "__main__":
         port=port,
         debug=False
     )
+    
     
 
